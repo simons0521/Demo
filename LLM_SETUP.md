@@ -206,6 +206,11 @@ trace 的 `llm_calls` 数组里，每一次模型调用都有一条记录，`pro
 调用模型失败（超时、错误码、空回答）走的是另一条路：那时返回
 `answer_type: "refusal"`，答案里写明原因，真实原因记进 trace，同样保证 200。
 
+**没有 Key 时前端也照常可用。** 看板三个视图只读 `/api/*`，跟有没有 Key 无关；
+调试面板要的检索明细，模板路径同样往 trace 里写（`answerer._search` 走的是
+同一套 `explain=True` 的检索）——**评审在干净环境里第一步就是不配 Key 跑起来，
+那一步看到的看板和面板，跟配了 Key 的是同一套代码渲染的**。
+
 ---
 
 ## 6. 依赖与安装
@@ -226,10 +231,20 @@ trace 的 `llm_calls` 数组里，每一次模型调用都有一条记录，`pro
 
 走 OpenAI 兼容协议，所以按契约 §7.5 跑了接入预检：
 
+预检的流程是**两步**：先起一个假模型（不联网、不花钱），它打印出三个环境变量；
+然后**带着这三个变量重启服务**，预检才开始发请求。
+
 ```bash
+# 第一步：起假模型，记下它打印的 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL
 cd starter
-# 用预检打印的三个环境变量重启服务（预检会打印，端口每次不同）
 python3 eval/llm_gateway.py preflight --service-url http://localhost:8000
+# ↑ 它会停在这儿等回车。另开一个终端，用上面那三个变量重启服务，再回来按回车。
+
+# 想写成脚本（比如 CI）就自己把服务先起好，再用 --no-wait：
+#   LLM_BASE_URL=http://127.0.0.1:6399/ds-gw LLM_API_KEY=... LLM_MODEL=... \
+#       uvicorn kbqa.server:app --port 8001
+#   python3 eval/llm_gateway.py preflight --service-url http://localhost:8001 \
+#       --port 6399 --no-wait
 ```
 
 **结果：14 项检查全部通过，退出码 0。** 预检结论原文：
@@ -256,7 +271,14 @@ python3 eval/llm_gateway.py preflight --service-url http://localhost:8000
 完整报告（含每一项的逐项证据、16 个场景的明细表）已归档在仓库里：
 
 - [`eval/reports/2026-09-26_preflight/preflight_report.md`](eval/reports/2026-09-26_preflight/preflight_report.md)
-- [`eval/reports/2026-09-26_preflight/preflight_report.json`](eval/reports/2026-09-26_preflight/preflight_report.json)
+  —— 最早那次，服务还是 100 分那一版
+- [`eval/reports/2026-09-26_preflight_final/preflight_report.md`](eval/reports/2026-09-26_preflight_final/preflight_report.md)
+  —— **最终代码上复跑的那次**（改动过 `live.py` 的收尾逻辑，按契约要求复跑）
+
+两次的数字**逐项相同**（60 次 `/ds-gw/chat/completions`、44 个工具调用、
+32 次问答、最慢 120.03 秒、18 次多轮往返）——假模型是确定性的，
+所以这正好说明后面那些改动**没有碰到协议层**：数字守卫改的是"什么算合法数字"，
+不碰请求怎么发、工具怎么回传。
 
 预检的环境：服务跑在本机 8000 端口，假模型 `llm_gateway.py` 2.0.0，
 `max_tokens` 4096，思考模式开启（所以 P10、P13 是真检查，不是"未检查"）。
@@ -282,14 +304,21 @@ python3 eval/llm_gateway.py preflight --service-url http://localhost:8000
 
 ### 7.2 有 Key 的实际问答抽样
 
-同一套代码接真实 DeepSeek（`deepseek-flash`）跑公开题库得 **100.00 / 100（55 题全过）**，
-两次独立运行逐题一致、零差异。两次运行的原始报告归档在：
+同一套代码接真实 DeepSeek（`deepseek-flash`）跑公开题库得 **100.00 / 100（55 题全过）**。
+**最终代码**（`b9b62c5`）那一轮的原始报告归档在：
 
+- [`eval/reports/2026-09-26_2047_live/`](eval/reports/2026-09-26_2047_live/) —— 最终提交的那一轮
+- [`eval/reports/2026-09-26_confirm_100/`](eval/reports/2026-09-26_confirm_100/) —— 回归基线，`make eval*` 都跟它比
 - [`eval/reports/2026-09-26_after_version_evidence/`](eval/reports/2026-09-26_after_version_evidence/)
-- [`eval/reports/2026-09-26_confirm_100/`](eval/reports/2026-09-26_confirm_100/)
 
+中间有一轮掉到 97.00（H02），是数字守卫的白名单漏了一条早就该有的规则，
+**不是代码退化**——诊断与修复见 `DEBUG_LOG.md` 第 8 节，前后经过见 `EVAL_REPORT.md` 第 3 节。
 更早的低分运行（starter 初始 18.00、作答质量修复后 89.00、DSML 回归那一轮 80.00）
-也都归档在 `eval/reports/` 下，前后对比见 `EVAL_REPORT.md`。
+也都归档在 `eval/reports/` 下。
+
+> 顺带一个反例：早期我们曾把"两次独立运行逐题一致"当成"100 分不是运气"的证据。
+> 那一轮 97.00 说明这个推理站不住——同一道题连中两次，只说明这两次抽到了同一面。
+> `EVAL_REPORT.md` 第 5 节记了这个教训。
 
 ---
 
@@ -315,9 +344,15 @@ python3 eval/llm_gateway.py preflight --service-url http://localhost:8000
 4. **`hang` 场景要等满 120 秒才返回。** 单次模型调用超时设的是契约允许的最大值
    120 秒，模型彻底不响应时用户会等到接近 120 秒才拿到 refusal。想更快返回就要
    调小 `LLM_TIMEOUT`，但那会把正常的慢回答也误判成失败，权衡后保留了 120 秒。
-5. **trace 里的 `search_kb` 只记了入参。** 检索步骤记录了 `params`（查询词、
-   top_k），但没有记命中了哪些文档、各自多少分、为什么被过滤掉。排查"为什么这题
-   检索错了"时这一步不够用，只能靠 `/api/retrieve` 手动重放。
-6. **索引缓存跟着仓库走**（`starter/.cache/index.json`）。改了知识库要重新执行
+5. **trace 只在内存里，重启即失，容量 200 次。** `TraceStore` 是个定长环形
+   缓冲（`capacity=200`），进程一退全没，`/api/trace/{id}` 也取不回来。
+   要留证据得在服务还活着的时候抓走（`/api/traces` 列出最近的摘要，
+   拿 `trace_id` 再去取完整的）。落盘是刻意没做的：这是运营内部的排障工具，
+   不值得为它引一个存储依赖，而契约要的是"这一次为什么这么答"能看见。
+6. **一次问答里可能出现两个 `search` 步。** live 路径的检索是模型调工具触发的
+   （`service.run_tool`），兜底回模板时模板自己还会再检索一次（`answerer._search`）。
+   两个都落痕，所以调试面板**必须按 `steps` 数组顺序渲染**，
+   不能按步骤名建字典——建字典会静默丢掉一个。
+7. **索引缓存跟着仓库走**（`starter/.cache/index.json`）。改了知识库要重新执行
    `make rebuild`，否则服务会加载旧索引。缓存键里带了知识库内容的指纹，内容变了
    键就变，但**不会自动重建**，需要手动跑一次。
