@@ -135,10 +135,13 @@ kept.append((...))                   # ← 无条件 append，日期、外键、
 `store_id` / `product_id` 也没有做 `strip().upper()` 规范化（KB-001 §2.1），
 所以 `s01` 这种写法即使想校验外键也校验不了。
 
-为了确认正确的口径长什么样，我按 KB-001 §2/§3 手写了一遍完整实现，跑出来：
+修完 `clean_rows()` 之后，从清洗表直接按 KB-001 §4 的口径算一遍指标题：
 
 ```
-removed {'date': 8, 'amt': 150, 'qty': 0, 'store': 10, 'prod': 40, 'dup': 100}  kept 18290
+removed {'1_unparseable_date': 8, '2_empty_amount': 150, '3_qty_le_zero': 30,
+         '4_store_not_in_stores': 10, '5_product_not_in_products': 40,
+         '6_duplicate_row': 100, 'note_unparseable_amount': 0}
+kept_rows 18290   sales 18196   refund 94
 M01 want 156757/953/4311/6496/36.36 -> 全部命中
 M02 want 41740/107/875/1395/47.7    -> 全部命中
 M03 want 11024/16/461/689/23.91     -> 全部命中
@@ -147,16 +150,21 @@ M05 want 0/0/0/0/None               -> 全部命中
 valid_sales_rows want 18290         -> 18290（与题库 N01 期望一致）
 ```
 
-五个指标题全部**精确命中**（连容差 0 的 `orders`、`qty` 都对得上），
-说明这份口径理解没有偏差，可以照它来修。
+五个指标题共 25 项断言全部**精确命中**（连零容差的 `orders`、`qty` 都对得上），
+说明这份口径理解没有偏差。
 
-顺带确认了一个版本陷阱：KB-001 §6 写明 v3 相对 v2 改了三处，
-其中"`amount` 为空的行改为直接剔除，v2 是按 `qty × unit_price` 回填后继续参与统计"。
-所以要**剔除**，不能回填。数据里正好有 150 行空 `amount`。
+这里有个容易踩的点：`kept_rows` 是 18290，而 `kept_sales_rows`（不含退款行）是 18196。
+`valid_sales_rows` 要的是**前者**——它是"清洗后还剩多少行"的健康指标，退款行也算数。
+一开始我按后者去对，差了 94，是 94 行退款行的量。
 
-另外 `DD-MM-YYYY` 的方向也有数据可自证：KB-001 §2.2 说"日在前、月在后"，
-并提示"这一类里会出现'日'大于 12 的样本"。原始数据里有 `30-07-2026`，
-按日在前解析成 2026-07-30 合法；按月在前会得到非法日期。方向确认。
+另外两条数据可以自证，不用猜：
+
+- **版本陷阱**：KB-001 §6 写明 v3 相对 v2 改了三处，其中"`amount` 为空的行改为直接剔除，
+  v2 是按 `qty × unit_price` 回填后继续参与统计"。所以要**剔除**，不能回填。
+  数据里正好有 150 行空 `amount`。
+- **`DD-MM-YYYY` 的方向**：KB-001 §2.2 说"日在前、月在后"，并提示"这一类里会出现
+  '日'大于 12 的样本"。原始数据里有 `30-07-2026`，按日在前解析成 2026-07-30 合法；
+  按月在前会得到非法日期。方向确认。
 
 ### 根因
 
@@ -171,11 +179,63 @@ valid_sales_rows want 18290         -> 18290（与题库 N01 期望一致）
 
 ### 修复
 
-- commit：（见下）
+commit `d09fc9b`，改 `starter/kbqa/cleaning.py`：
+
+- 新增 `parse_date()`：收 `YYYY-MM-DD` / `YYYY/M/D` / `DD-MM-YYYY` 三种格式，
+  返回 ISO；都认不出来返回 `None`。`%d-%m-%Y` 放在最后试，
+  所以 ISO 与斜杠格式不会被它抢走（`2026-06-01` 用 `%d-%m-%Y` 解析会
+  把 2026 当成"日"而失败），方向不会反。
+- 新增 `normalise_code()`：`strip().upper()`。**必须发生在判外键之前**，
+  否则 `s01` 会被当成不存在的门店误删，这正是 KB-001 §7.2 提醒的那个坑。
+- 重写 `clean_rows()`：按 §3 的顺序执行六条剔除。用一串 `continue` 而不是
+  一次性判六条，保证一行同时踩两条规则时只记在前一条头上，
+  各条计数之和才等于剔除总数。
+  - 规则 2 里，`amount` 为空算 `2_empty_amount`；非空但解析不出来的
+    （`"abc"` 之类）同样剔除，但另记一笔 `note_unparseable_amount`——
+    不能悄悄当 0 元记成一笔收入。真实数据里这一类是 0 行。
+  - 规则 6 的签名是七个字段**规范化之后**的元组。共用订单号、只差商品的多行订单
+    签名不同，自然留下（§7.3）。
+  - `is_refund` 由 `cents < 0` 判定，退款行保留。
+- `build_clean_db()`：维表跟着 §2.1 一起规范化，清洗表里的外键才真的能对上；
+  规范化后若撞号保留先出现的那个。
+
+顺带修好了缺陷 #18：`data_period` 之前取到 `""` 和 `"N/A"`，
+现在脏日期在清洗阶段就被剔掉，`MIN/MAX` 拿到的是纯 ISO 日期。
 
 ### 回归测试
 
-- 测试名：（见下）
+`starter/tests/test_cleaning.py`，11 个用例，commit `1c23d51`（红）→ `d09fc9b`（绿）：
+
+| 用例 | 压的是 KB-001 哪一条 |
+|---|---|
+| `test_amount_strips_currency_symbol` | §2.3 `¥38.00` 与 `38.00` 同额 |
+| `test_empty_amount_is_a_removal_not_a_fill` | §3.2 空金额剔除、不回填 |
+| `test_ids_are_normalised_before_foreign_key_check` | §2.1 + §7.2 规范化先于判外键 |
+| `test_dates_are_normalised_to_iso` | §2.2 三种格式，`DD-MM-YYYY` 日在前 |
+| `test_each_removal_rule_has_its_own_count` | §3 六条各自计数 |
+| `test_removal_reasons_are_fully_accounted` | §3 台账要对得上账 |
+| `test_rules_run_in_order` | §3 "按顺序执行"，一行只记一条 |
+| `test_multi_line_orders_are_kept` | §3.6 + §7.3 多行订单不是重复行 |
+| `test_refund_rows_are_kept_and_flagged` | §4 退款行保留并标 `is_refund` |
+| `test_report_shape_covers_every_reason` | 台账键覆盖全部原因 |
+| `test_real_dataset_is_actually_cleaned` | 真实数据的不变量 |
+
+前十个用一份 21 行的合成明细（`_ROWS`）压各条规则，**不写死真实数据集的数字**——
+评审会换 `data/`。最后一个在真实数据上只断言与数据无关的不变量：
+日期全是 ISO、外键全合法、`qty` 全为正、清洗确实剔掉了东西。
+
+红→绿的证据：
+
+```
+# commit 1c23d51（修复前）
+7 failed, 4 passed in 0.10s
+# commit d09fc9b（修复后）
+11 passed in 0.12s
+```
+
+写测试时我把夹具的算术数错了（以为 20 行、保留 8 行），第一次跑出来
+`kept_rows=9` 而断言写的是 8。六条剔除的计数当时已经全部命中，
+错的只是我自己数错了行数，改的是测试不是实现。
 
 ---
 
