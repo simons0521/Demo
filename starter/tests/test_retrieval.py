@@ -15,9 +15,13 @@ from pathlib import Path
 
 import pytest
 
-from kbqa.chunker import CHUNK_SIZE, chunk_document
-from kbqa.index import build_index, content_key, load_index
+from datetime import date
+
+from kbqa.aliases import AliasTable
+from kbqa.chunker import CHUNK_SIZE, Chunk, chunk_document
+from kbqa.index import BM25Index, build_index, content_key, load_index
 from kbqa.loader import Document, load_knowledge_base
+from kbqa.retriever import Retriever
 from kbqa.tokenizer import content_tokens, normalise, tokenize
 
 import kbqa.index as index_module
@@ -435,6 +439,125 @@ def test_a_corrupt_cache_is_rebuilt(tmp_path):
     index = load_index(kb, cache)
     assert index.chunks
     assert cache.read_text(encoding="utf-8").startswith("{")  # 已经被正常内容覆盖
+
+
+# -- 检索器 ---------------------------------------------------------------------
+
+
+def _synthetic_index(pairs, meta=None):
+    """用（doc_id, 块文本）造一个小索引，不落盘、不碰真实知识库。"""
+    chunks = [
+        Chunk(doc_id=doc_id, chunk_id="%s#%d" % (doc_id, number), text=text, source_text=text)
+        for doc_id, number, text in pairs
+    ]
+    return BM25Index(chunks, meta or {}, AliasTable.from_json({}), "test-key")
+
+
+def _synthetic_retriever(pairs, meta=None):
+    return Retriever(_synthetic_index(pairs, meta), date(2026, 9, 1))
+
+
+def test_every_hit_reports_its_own_doc_id():
+    """`hit.doc_id` 必须是这块片段**自己**所属的文档。
+
+    原实现第 276 行 `hit.doc_id = ordered[len(hits)].doc_id`：
+    它拿"全局第几条"去另一个数组里取文档。只要前面有片段被跳过
+    （同一篇文档的第二个片段就会被 `MAX_CHUNKS_PER_DOC` 跳过），
+    两个下标就错开了，`doc_id` 挂到别人的片段上。
+
+    实测就是这个样子：`doc_id=KB-012 chunk_id=KB-013#2`、
+    `doc_id=KB-041 chunk_id=KB-022#2`——返回给评测的文档号全是错的，
+    正确答案明明被检索到了，报上去的却是另一篇。
+    """
+    # KB-A 的两块必须是最高分：只有"同一篇的第二个片段被跳过"之后，
+    # 两个下标才会错开。写得比别家长的话，BM25 的长度归一化会把它们压到后面，
+    # 跳过根本不会发生，这条测试就成了假绿。
+    retriever = _synthetic_retriever(
+        [
+            ("KB-A", 1, "苹果苹果苹果价格"),
+            ("KB-A", 2, "苹果苹果苹果规格"),
+            ("KB-B", 1, "苹果的陈列要求，苹果摆放位置，苹果面向顾客。"),
+            ("KB-C", 1, "苹果的采购周期，苹果进货频次，苹果验收标准。"),
+        ]
+    )
+    result = retriever.search("苹果", top_k=3)
+
+    for hit in result.hits:
+        assert hit.chunk_id.startswith(hit.doc_id), (
+            "doc_id 与 chunk_id 对不上：doc_id=%s chunk_id=%s" % (hit.doc_id, hit.chunk_id)
+        )
+    assert {hit.doc_id for hit in result.hits} == {"KB-A", "KB-B", "KB-C"}
+
+
+def test_a_document_never_takes_more_than_one_slot():
+    """`MAX_CHUNKS_PER_DOC = 1`：多留几篇不同的文档，比同一篇留两段有用。"""
+    retriever = _synthetic_retriever(
+        [
+            ("KB-A", 1, "苹果的售价与规格说明，苹果分级标准。"),
+            ("KB-A", 2, "苹果的产地与运输方式，苹果冷链要求。"),
+            ("KB-A", 3, "苹果的包装与损耗标准，苹果验收规则。"),
+            ("KB-B", 1, "苹果的陈列要求，苹果摆放位置。"),
+        ]
+    )
+    result = retriever.search("苹果", top_k=3)
+    doc_ids = [hit.doc_id for hit in result.hits if not hit.padded]
+    assert len(doc_ids) == len(set(doc_ids)), "同一篇文档占了两格：%s" % doc_ids
+
+
+def test_filtered_chunks_never_take_a_slot():
+    """被元数据过滤掉的文档，它的片段**不能占名额**。
+
+    契约 §4 写明："先取前 `top_k` 再做过滤、结果只剩两三条的实现，不符合这一条"。
+    原实现 `allowed = set(range(len(chunks)))` 把全部片段都放进去打分，
+    过滤却留到最后一步才做（第 307 行），于是结果常常不足 `top_k`。
+    """
+    meta = {
+        "KB-OLD": {"status": "已废止", "superseded_by": "KB-NEW", "effective_from": "2026-01-01"},
+        "KB-NEW": {"status": "现行", "effective_from": "2026-05-01"},
+    }
+    retriever = _synthetic_retriever(
+        [
+            # 已废止的那一篇分数最高，最容易被它挤掉名额
+            ("KB-OLD", 1, "苹果的售价与规格说明，苹果分级标准，苹果验收。"),
+            ("KB-OLD", 2, "苹果的产地与运输方式，苹果冷链，苹果到货。"),
+            ("KB-NEW", 1, "苹果的售价与规格说明。"),
+            ("KB-B", 1, "苹果的陈列要求。"),
+            ("KB-C", 1, "苹果的采购周期。"),
+        ],
+        meta,
+    )
+    result = retriever.search("苹果", top_k=3)
+
+    assert len(result.hits) == 3, "只剩下 %d 条，过滤不该吃掉名额" % len(result.hits)
+    assert "KB-OLD" not in {hit.doc_id for hit in result.hits}
+    assert filtered_docs(result) == {"KB-OLD"}
+
+
+def filtered_docs(result) -> set:
+    return {item["doc_id"] for item in result.filtered}
+
+
+def test_hits_are_sorted_by_score_descending():
+    """契约 §4：按相关性从高到低。补齐之后也得重排。"""
+    retriever = _synthetic_retriever(
+        [
+            ("KB-A", 1, "苹果"),
+            ("KB-B", 1, "苹果的售价与规格说明，苹果分级标准。"),
+            ("KB-C", 1, "苹果"),
+            ("KB-D", 1, "苹果"),
+        ]
+    )
+    result = retriever.search("苹果", top_k=3)
+    scores = [hit.score for hit in result.hits]
+    assert scores == sorted(scores, reverse=True), scores
+
+
+def test_a_tiny_index_returns_what_it_has():
+    """索引里的片段本来就不足 `top_k` 时，给少一点是允许的——但不能补出空块。"""
+    retriever = _synthetic_retriever([("KB-A", 1, "苹果的售价。"), ("KB-B", 1, "香蕉的价格。")])
+    result = retriever.search("苹果", top_k=5)
+    assert len(result.hits) == 2
+    assert all(hit.text.strip() for hit in result.hits)
 
 
 # -- 真实知识库的不变量（不写死任何数字） ----------------------------------------
