@@ -153,7 +153,10 @@ class Service:
                 return Answer(answer="没有收到问题内容，请再说一次。", answer_type="clarify")
             history = self.sessions.history(session_id)
             started = time.perf_counter()
-            plan = self.planner.plan(question)
+            # `history` 必须传给规划器：追问还原（“那 7 月呢”）靠的就是上一轮的
+            # 问句和槽位。只把它交给下面的引擎是不够的——引擎拿到的是**已经规划完**
+            # 的问题，那一刻"那 7 月呢"已经被当成没有上文的孤立追问反问回去了。
+            plan = self.planner.plan(question, history)
             trace.step("plan", plan.as_trace(), started=started)
             answer = self._run_engine(plan, trace, history)
             self.sessions.append(
