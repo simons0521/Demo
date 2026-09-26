@@ -45,12 +45,12 @@
 
 按依赖顺序排列，编号即排查顺序。
 
-| # | 层 | 位置 | 一句话 |
-|---|---|---|---|
-| 1 | 口径 | `cleaning.py:77-102` | KB-001 的规范化与六条剔除一条都没实现 |
-| 2 | 口径 | `tools.py:52-61` | 日期区间用了半开区间，丢掉区间最后一天 |
-| 3 | 口径 | `tools.py:96-108` | 退款行被排除、退款金额硬编码 0、订单数用明细行数、客单价分母错 |
-| 4 | 口径 | `tools.py:122-151` | `daily_metrics` 与 `summary` 口径不一致 |
+| # | 层 | 位置 | 一句话 | 状态 |
+|---|---|---|---|---|
+| 1 | 口径 | `cleaning.py:77-102` | KB-001 的规范化与六条剔除一条都没实现 | ✅ 已修 `d09fc9b` |
+| 2 | 口径 | `tools.py:52-61` | 日期区间用了半开区间，丢掉区间最后一天 | ✅ 已修 `e3b00ca` |
+| 3 | 口径 | `tools.py:96-108` | 退款行被排除、退款金额硬编码 0、订单数用明细行数、客单价分母错 | ✅ 已修 `e3b00ca` |
+| 4 | 口径 | `tools.py:122-151` | `daily_metrics` 与 `summary` 口径不一致 | ✅ 已修 `e3b00ca` |
 | 5 | 检索 | `tokenizer.py:20-22` | 中文按空白切词，整句变成一个 token，BM25 失效 |
 | 6 | 检索 | `loader.py:12` | 只收 `.md`，`.txt` / `.html` 不进索引 |
 | 7 | 检索 | `loader.py:82-84` | 只按 UTF-8 解码，GBK 导出的旧文件变乱码 |
@@ -236,6 +236,165 @@ commit `d09fc9b`，改 `starter/kbqa/cleaning.py`：
 写测试时我把夹具的算术数错了（以为 20 行、保留 8 行），第一次跑出来
 `kept_rows=9` 而断言写的是 8。六条剔除的计数当时已经全部命中，
 错的只是我自己数错了行数，改的是测试不是实现。
+
+---
+
+## 2. 指标口径：三处同源缺陷
+
+清洗修好之后指标仍然全线偏，说明问题不止一层。缺陷 #2 / #3 / #4 是同一类，
+都在 `tools.py`，一次改完。
+
+### 现象
+
+`GET /api/metrics/summary?start=2026-06-01&end=2026-06-30`：
+
+```json
+{"net_revenue": 153131.0, "refund_amount": 0.0, "orders": 4243, "aov": 36.09, "qty": 6334}
+```
+
+题库 M01 期望 `156757.00` / `953.00` / `4311` / `36.36` / `6496`。
+五个数没有一个对，但都"差不多"——不是崩溃，是系统性偏差，最难发现的那种。
+
+### 假设
+
+- **猜 A：清洗还是不对。** 排除 —— 清洗台账与 N01 的 `valid_sales_rows` 已经对上了，
+  换 `tools.py` 一处不改、直接用 SQL 按 §4 算一遍，五个数全中。
+  所以数据是对的，**算的人不对**。
+- **猜 B：只是"漏了退款"一处。** 排除 —— 补上退款后净营业额是 156757 + 953 = 157710，
+  比期望**多了** 953；说明还有一处反向的偏差在抵消它。
+- **猜 C：日期区间是半开区间，丢掉了最后一天。** ← 方向对了，顺着查下去三条都出来了。
+
+### 验证
+
+把旧实现的输出逐个拆开，看每一个数是怎么算出来的：
+
+```bash
+.venv/bin/python -c "
+import sqlite3
+c = sqlite3.connect('var/clean.db')
+print('6 月销售行净额  ', c.execute(\"SELECT SUM(amount_cents)/100.0 FROM sales_clean\"
+      \" WHERE date>='2026-06-01' AND date<='2026-06-30' AND is_refund=0\").fetchone()[0])
+print('6/30 销售行净额 ', c.execute(\"SELECT SUM(amount_cents)/100.0 FROM sales_clean\"
+      \" WHERE date='2026-06-30' AND is_refund=0\").fetchone()[0])
+print('6 月明细行数    ', c.execute(\"SELECT COUNT(*) FROM sales_clean\"
+      \" WHERE date>='2026-06-01' AND date<='2026-06-30' AND is_refund=0\").fetchone()[0])
+print('6/30 明细行数   ', c.execute(\"SELECT COUNT(*) FROM sales_clean\"
+      \" WHERE date='2026-06-30' AND is_refund=0\").fetchone()[0])
+"
+# 157710.0 / 4579.0 / 4380 / 137
+```
+
+三个错值全部能精确复现：
+
+| 指标 | 旧实现算出 | 拆解 |
+|---|---|---|
+| `net_revenue` | 153131.0 | 157710（6 月销售行）− 4579（丢掉 6/30）= 153131 ✅ |
+| `orders` | 4243 | 4380（销售明细行数）− 137（丢掉 6/30）= 4243 ✅ |
+| `qty` | 6334 | 截至 6/29 的销售 `qty` 之和，既不冲退款也不含 6/30 ✅ |
+
+对上账就说明没有第四处偏差了。三处分别是：
+
+1. **半开区间**（`_where`）：`date >= ? AND date < ?`，整天丢掉区间最后一天。
+2. **退款被当成"不是营业"排掉**（`query_metrics` 的 `WHERE ... AND is_refund = 0`）。
+   而 §4 的**净营业额就是销售行加退款行**，退款是负的。排掉等于把营业额算高。
+   这条与第 1 条方向相反，两条叠在一起互相抵消，`net_revenue` 只差 2.3%，
+   看起来像"精度问题"而不是"口径错误"——这是它藏得住的原因。
+3. **订单数用明细行数**（`COUNT(*)`）：一张单点两个菜就算两单，客单价被算低。
+
+顺带确认 `refund_amount` 是硬编码的 `0`（`tools.py:100`），
+`qty` 也只有 `SUM(qty)` 没冲退款。`daily_metrics` 的 `COUNT(DISTINCT ...)` 和
+`SUM(amount_cents)` 其实是对的，它只是被 `_where` 连累，以及和 `summary` 口径不一致。
+
+### 根因
+
+`kbqa/tools.py`：
+
+- `tools.py:53` `clause = ["date >= ?", "date < ?"]` —— 契约 §4 要求闭区间。
+- `tools.py:97-107` `query_metrics()` 的四个基数全错：
+  - `WHERE ... AND is_refund = 0` 排掉退款行；
+  - `refund_cents` 用字面量 `0` 占位；
+  - `COUNT(*)` 数明细行而不是 `COUNT(DISTINCT order_id)`；
+  - `SUM(qty)` 没冲减退款。
+- `tools.py:109` 客单价的分母跟着错成了明细行数。
+
+`payment_mix` / `top_products` / `by_store` 的 `is_refund`、`DISTINCT`、`qty`
+语义本来是对的，只被 `_where` 连累。
+
+### 修复
+
+commit `e3b00ca`，改 `starter/kbqa/tools.py`：
+
+- `_where()`：`date < ?` → `date <= ?`。
+- `query_metrics()`：四条口径按 §4 重写。一个查询里取完四个基数
+  （净额、退款、去重订单数、净销量），避免分两次查时区间跨午夜对不上——
+  这个服务"今天"是固定的，但真实上线时不是。
+
+  ```sql
+  SELECT COALESCE(SUM(amount_cents), 0),                    -- 销售 + 退款 = 净额
+         COALESCE(-SUM(CASE WHEN is_refund = 1
+                            THEN amount_cents END), 0),        -- 取绝对值
+         COUNT(DISTINCT CASE WHEN is_refund = 0
+                             THEN order_id END),               -- 去重，退款不参与
+         COALESCE(SUM(CASE WHEN is_refund = 0
+                           THEN qty ELSE -qty END), 0)         -- 销量冲减退款
+  FROM sales_clean WHERE <闭区间>
+  ```
+
+改的过程中自己踩了一次坑：SQL 里已经 `-SUM(...)` 取过绝对值了，
+返回值那行还留着原来的 `yuan(-refund_cents)`，重复取负，`refund_amount` 变成了负数。
+是测试里 `assert refund_amount >= 0` 抓出来的。
+
+### 回归测试
+
+`starter/tests/test_metrics.py`，13 个用例，commit `16c8065`（红）→ `e3b00ca`（绿）：
+
+| 用例 | 压的是哪一条 |
+|---|---|
+| `test_end_date_is_inclusive` | 契约 §4 右端闭 |
+| `test_start_date_is_inclusive` | 契约 §4 左端闭 |
+| `test_out_of_range_is_excluded` | 区间外不能漏进来 |
+| `test_net_revenue_includes_refunds` | §4 净营业额 = 销售 + 退款 |
+| `test_orders_counts_distinct_orders_not_rows` | §4 订单数去重 |
+| `test_qty_nets_out_refunds` | §4 销量冲退款 |
+| `test_aov_uses_distinct_orders_as_denominator` | §4 客单价分母 |
+| `test_summary_reports_all_metric_fields` | 契约 §4 五个字段齐全 |
+| `test_empty_range_is_zeros_not_nulls` | 空区间是 0 与 `null`，不是缺字段 |
+| `test_store_and_product_filters` | §2.1 过滤编号先规范化 |
+| `test_daily_covers_every_day_including_empty_ones` | 契约 §4 每天都要有记录 |
+| `test_daily_uses_the_same_definitions_as_summary` | 日与汇总口径一致 |
+| `test_real_dataset_metrics_are_consistent` | 真实数据的自洽不变量 |
+
+夹具是一张手搭的清洗表（不走 `build_clean_db`），指标层是独立的一层，
+测试不该被清洗层的行为左右。
+
+写夹具时踩了自己的第二个坑：一开始只放**一张**多行订单，
+`test_orders_counts_distinct_orders_not_rows` 竟然通过了——
+半开区间恰好把最后一天排除掉，剩下的 3 行明细正好等于 3 张单，
+`COUNT(*)` 与 `COUNT(DISTINCT ...)` 撞在一起，缺陷被掩盖。
+补上第二张多行订单（D1）后明细 5 行、订单 4 张，才真的红起来。
+**一个不会红的测试比没有测试更危险**，它给人已经验过的错觉。
+
+红→绿的证据：
+
+```
+# commit 16c8065（修复前）
+10 failed, 3 passed in 0.15s
+# commit e3b00ca（修复后）
+13 passed in 0.15s
+```
+
+真实接口上的最终验收（M01–M06 六道指标题，25 项断言）：
+
+```
+M01 156757.00 / 953.00 / 4311 / 36.36 / 6496
+M02  41740.00 / 107.00 /  875 / 47.70 / 1395
+M03  11024.00 /  16.00 /  461 / 23.91 /  689
+M04   3625.00 /   0.00 /   53 / 68.40 /  125
+M05      0.00 /   0.00 /    0 /  null /    0
+M06 5 天，6/8–6/11 全 0，6/12 为 998.00 / 27 / 36.96
+```
+
+全部精确命中，含零容差的 `orders` 与 `qty`。
 
 ---
 
