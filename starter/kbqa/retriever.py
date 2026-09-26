@@ -237,7 +237,14 @@ class Retriever:
             if reason:
                 excluded.add(doc_id)
                 filtered.append({"doc_id": doc_id, "reason": reason})
-        allowed = set(range(len(self.index.chunks)))
+        # 契约 §4：被过滤的文档不能占名额。先把它剔除再打分——
+        # 打分时放进来、取完 top-k 再过滤的话，名额已经被它吃掉了，
+        # 结果会凑不满 top_k（实测 3 条只剩 1 条）。
+        allowed = {
+            position
+            for position, chunk in enumerate(self.index.chunks)
+            if chunk.doc_id not in excluded
+        }
 
         scores = self.index.score_terms(self._weights(query), allowed)
         concepts, expansions = self._concept_scores(query, allowed)
@@ -261,9 +268,9 @@ class Retriever:
             )
         adjusted.sort(key=lambda item: (-item[0], item[1]))
 
-        ordered = [self.index.chunks[position] for _, position in adjusted]
         hits: list[Hit] = []
         taken: set[int] = set()
+        matched: list[int] = []  # 真正命中、且真的进了结果的位置，用来算覆盖率
         per_doc: dict[str, int] = {}
         for score, position in adjusted:
             chunk = self.index.chunks[position]
@@ -271,10 +278,8 @@ class Retriever:
                 continue
             per_doc[chunk.doc_id] = per_doc.get(chunk.doc_id, 0) + 1
             taken.add(position)
-            hit = self._hit(position, score, filtered)
-            # 第几条命中就取排序里的第几篇文档。
-            hit.doc_id = ordered[len(hits)].doc_id
-            hits.append(hit)
+            matched.append(position)
+            hits.append(self._hit(position, score, filtered))
             if len(hits) >= top_k:
                 break
 
@@ -298,13 +303,17 @@ class Retriever:
             for score, position in remaining:
                 if len(hits) >= top_k:
                     break
+                chunk = self.index.chunks[position]
+                # 补齐也要守"一篇文档最多一格"：原实现只管取 top-k 的那一轮，
+                # 补齐这一轮会把同一篇的片段连着塞进来（实测 KB-001 出现三次）。
+                if per_doc.get(chunk.doc_id, 0) >= MAX_CHUNKS_PER_DOC:
+                    continue
+                per_doc[chunk.doc_id] = per_doc.get(chunk.doc_id, 0) + 1
                 taken.add(position)
                 hits.append(self._hit(position, score, filtered, padded=True))
             # 契约 §4 还要求“按相关性从高到低”：补齐之后整体再排一次。
             # 每篇文档只占一格是挑片段的规则，不是排序的规则。
             hits.sort(key=lambda hit: -hit.score)
-        # 取够 top-k 之后，再把过滤掉的那些版本去掉。
-        hits = [hit for hit in hits if hit.doc_id not in excluded]
 
         return SearchResult(
             hits=hits,
@@ -312,20 +321,22 @@ class Retriever:
             terms=content_tokens(query),
             expansions=expansions,
             filtered=filtered,
-            coverage=self._coverage(query, adjusted, top_k),
+            coverage=self._coverage(query, matched),
         )
 
-    def _coverage(self, query: str, adjusted: list[tuple[float, int]], top_k: int) -> float:
-        """问题被最好的那几个片段覆盖了多少。
+    def _coverage(self, query: str, positions: list[int]) -> float:
+        """问题被**实际返回**的那几个片段覆盖了多少。
 
         只看真正命中的片段：一个词都没命中时（“zzzqqq”），覆盖率就是 0，
         这是定义，不是异常——为了凑满 top_k 补上的片段不参与这个判断。
+
+        取的是实际返回的位置，不是"排序后的前 top_k 个"：被元数据过滤掉的
+        文档不返回，就不该拿它的覆盖率来代表这次检索。
         """
-        candidates = adjusted[: max(1, top_k)]
-        if not candidates:
+        if not positions:
             return 0.0
         terms = content_tokens(query)
-        return max(self.index.coverage(terms, position) for _, position in candidates)
+        return max(self.index.coverage(terms, position) for position in positions)
 
 
 def build_retriever(kb_dir: Path, index_path: Path, today: date, rebuild: bool = False) -> Retriever:
