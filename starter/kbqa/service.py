@@ -67,7 +67,10 @@ class Service:
         return {
             "status": "ok",
             "llm_mode": self.settings.llm_mode,
-            "kb_docs": sum(1 for path in self.settings.kb_dir.rglob("*") if path.is_file()),
+            # 契约 §1：`kb_docs` 是"实际进入索引的文档数，不是目录里的文件数"。
+            # 目录里混着没有 KB-xxx 编号的说明文件（README.md 之类），它们不是文档；
+            # 索引的 `docs_meta` 才是"进来了几篇"，和加载器的判断天然一致。
+            "kb_docs": len(self.index.docs_meta),
             "kb_chunks": len(self.index.chunks),
             "valid_sales_rows": self.tools.valid_sales_rows(),
             "today": self.settings.today.isoformat(),
@@ -170,10 +173,19 @@ class Service:
                 },
             )
             return answer
-        except Exception:  # noqa: BLE001 - 不管里面出什么事，接口都得给个像样的回答
+        except Exception as exc:  # noqa: BLE001 - 不管里面出什么事，接口都得给个像样的回答
+            # 契约 §5：接口照样返回 200 和合法的 JSON，把错误体现在
+            # `answer_type: "refusal"` 与 `answer` 的说明里，**同时在 trace 里
+            # 留下真实的错误原因**。
+            # 原来是个连 `exc` 都没绑名字的裸 except：异常信息一点没留，
+            # 出问题时 trace 里只剩一句"抱歉，我暂时无法回答"——兜底答复
+            # 反倒把真实原因盖住了，线上只能靠猜。
+            trace.error("answer", exc)
             return Answer(
-                answer="抱歉，我暂时无法回答。",
+                answer="抱歉，我暂时无法回答。处理这次提问时出了内部错误"
+                "（%s: %s），完整堆栈记在 trace 里。" % (type(exc).__name__, exc),
                 answer_type="refusal",
+                notes=["内部错误 %s: %s" % (type(exc).__name__, exc)],
             )
 
     def _run_engine(self, plan, trace: Trace, history: list[dict]) -> Answer:
