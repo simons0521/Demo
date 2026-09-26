@@ -4,3 +4,9 @@
 
 # 调试用的模型流量日志（eval/llm_gateway.py proxy --log）
 /llm_traffic.jsonl
+
+__pycache__/
+
+# `make eval-free` 的产物：每次跑都重来一遍、完全可再生的 22 分，不必进仓库。
+# 带日期的 mock / live 报告（`*_mock`、`*_live`）是要归档的证据，**不**忽略。
+eval/reports/*_free_*

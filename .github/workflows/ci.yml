@@ -1,0 +1,64 @@
+name: CI
+
+# 只跑**不花钱、不联网**的那部分：单测、评测脚本自身的自测、题库离线体检，
+# 以及对着本地服务跑的 22 分（检索 / 指标 / 健康检查——这三类不调模型）。
+# 完整 55 题要走真模型、要花钱，留给人工触发（starter/Makefile 的 make eval）。
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 装依赖
+        run: pip install -r starter/requirements.txt
+
+      # CI 里没有 starter/.venv，所以必须显式 PY=python 覆盖 Makefile 的默认值。
+      - name: 单测
+        run: make -C starter test PY=python
+
+      # **必须在 eval/tests 目录下跑**：这两个文件靠 sys.path.insert 找 run_eval，
+      # 从仓库根跑连模块都找不到。也**不要用 unittest discover**——将来往
+      # eval/tests/ 里加文件会被一起收进来，那不在本流水线的意图里。
+      - name: 评测脚本自测
+        working-directory: eval/tests
+        run: python3 -m unittest test_run_eval test_run_eval_public -v
+
+      # 不连服务：只查题库自身的结构、检查键名、doc_id 是否真在知识库里。
+      - name: 自己的评测题（离线体检）
+        run: python3 scripts/check_my_questions.py
+
+      # 端到端：起服务 → 跑三类不调模型的评测 → 自动跟回归基线比，掉分则非零退出。
+      # 服务起不来时兜底：60 秒等不到 /api/health 就直接失败，不要让后面的评测
+      # 去连一个空气端口、报出一堆看起来像"实现坏了"的错。
+      - name: 起服务（不配 Key，走模板作答）
+        run: |
+          cd starter
+          # 三个流都要接走：只重定向 stdout/stderr 而留着 stdin，这一步会一直
+          # 等到后台进程退出才结束（它不退，这一步就挂到超时）。
+          env -u LLM_BASE_URL -u LLM_API_KEY -u LLM_MODEL \
+            python -m uvicorn kbqa.server:app --host 127.0.0.1 --port 8000 \
+            > /tmp/uvicorn.log 2>&1 < /dev/null &
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8000/api/health > /dev/null && exit 0
+            sleep 1
+          done
+          echo "服务 60 秒内没起来，日志："
+          cat /tmp/uvicorn.log
+          exit 1
+
+      - name: 不调模型的三类评测（22 分）
+        run: make -C starter eval-free PY=python PY3=python
+
+      - name: 服务日志（失败了才看得到）
+        if: failure()
+        run: cat /tmp/uvicorn.log
