@@ -77,7 +77,8 @@ def test_bigrams_do_not_cross_script_or_punctuation():
     """标点、空格、中英边界都要断开，不能让"款，"这种残渣进索引。"""
     assert tokenize("退款，政策") == ["退款", "政策"]
     assert tokenize("牛肉poke") == ["牛肉", "poke"]
-    assert tokenize("Makai Poke 三文鱼") == ["makai", "poke", "三文鱼"]
+    # 中文段照切二元组，英文段整词——两者互不影响
+    assert tokenize("Makai Poke 三文鱼") == ["makai", "poke", "三文", "文鱼"]
 
 
 def test_normalise_is_still_applied():

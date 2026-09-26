@@ -9,7 +9,10 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-SUPPORTED_SUFFIXES = {".md", ".markdown"}
+#: 契约 §0：编号在文件名开头，**与格式无关**。`.txt`（旧 OA 导出、英文邮件）
+#: 与 `.html`（内部 FAQ 页）和 `.md` 一视同仁。
+SUPPORTED_SUFFIXES = {".md", ".markdown", ".txt", ".html", ".htm"}
+_MARKUP_SUFFIXES = {".html", ".htm"}
 
 #: 文件名开头的编号就是 doc_id，与文件格式无关（契约 §0）。
 _DOC_ID = re.compile(r"^(KB-\d+)")
@@ -77,11 +80,37 @@ class Document:
 
 
 _HTML_TITLE = re.compile(r"<title>(.*?)</title>", re.S | re.I)
+#: `<script>` / `<style>` 整块丢掉——里面的 CSS 与 JS 会切成一大片噪声二元组。
+_SCRIPT_BLOCK = re.compile(r"<(script|style)\b.*?</\1>", re.I | re.S)
+_ANY_TAG = re.compile(r"<[^>]+>")
 
 
 def decode_bytes(raw: bytes, path: Path, warnings: list[str]) -> str:
-    """统一按 UTF-8 读。个别老文件里有怪字符，忽略掉就行，不影响检索。"""
-    return raw.decode("utf-8", errors="ignore")
+    """先按 UTF-8 读，不行再按 GB18030 读。
+
+    KB-062 是旧 OA 用 GBK 导出的 `.txt`，按 UTF-8 硬读必然失败。
+    原来的 `errors="ignore"` 会把解不出来的字节**直接删掉**：正文缺一大块，
+    没有任何报错，检索只会莫名其妙地少召回——比抛异常难查得多。
+    GB18030 是 GBK 的超集，两者都能收。
+    """
+    for encoding in ("utf-8", "gb18030"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    warnings.append("按 UTF-8 与 GB18030 都读不出，已用替换字符兜底：%s" % path.name)
+    return raw.decode("utf-8", errors="replace")
+
+
+def html_to_text(text: str) -> str:
+    """把 HTML 降成可见正文：先整块去掉 `<script>`/`<style>`，再去掉标签。
+
+    标签换成**空格**而不是空串，`<p>发票</p><p>宠物</p>` 才不会粘成
+    `发票宠物` 一个词。
+    """
+    text = _SCRIPT_BLOCK.sub(" ", text)
+    text = _ANY_TAG.sub(" ", text)
+    return html_module.unescape(text)
 
 
 def parse_front_matter(text: str) -> tuple[dict, str]:
@@ -176,10 +205,11 @@ def load_document(path: Path) -> Optional[Document]:
     if fmt == "md":
         meta, text = parse_front_matter(text)
     elif fmt == "html":
-        # html 直接按文本入库，标签也就那么几个，BM25 自己会忽略。
+        # 标题要从原始 HTML 里取，剥完标签就只剩正文了。
         match_title = _HTML_TITLE.search(text)
         html_title = html_module.unescape(match_title.group(1).strip()) if match_title else ""
         meta = {"title": html_title.split("-")[0].strip() or html_title}
+        text = html_to_text(text)
 
     match = _DOC_ID.match(path.name)
     doc_id = str(meta.get("doc_id") or (match.group(1) if match else "")).strip()
