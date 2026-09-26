@@ -12,7 +12,7 @@ from typing import Optional
 
 from .aliases import AliasTable, build_alias_table
 from .chunker import CHUNKER_VERSION, Chunk, chunk_documents
-from .loader import Document, load_knowledge_base
+from .loader import SUPPORTED_SUFFIXES, Document, load_knowledge_base
 from .tokenizer import TOKENIZER_VERSION, tokenize
 
 INDEX_VERSION = "bm25-3"
@@ -21,9 +21,26 @@ B = 0.75
 
 
 def content_key(kb_dir: Path) -> str:
-    """缓存键：三个版本号拼起来哈希一下。改了切块或分词，键就变，缓存自动失效。"""
+    """缓存键 = 三个版本号 + **知识库内容的摘要**。
+
+    只哈希版本号是不够的：改一篇文档的正文而版本号没变，键就原样不变，
+    缓存永远"命中"，服务跑的还是旧索引。仓库里那份 `.cache/index.json`
+    就是这么过期并且一路提交进 git 的（25 篇对不上实际的 35 篇）。
+
+    摘要按**相对路径**算，所以目录挪个位置、整体拷一份，键都一样；
+    路径也进摘要，改文件名同样会让缓存失效。
+    """
     digest = hashlib.sha256()
     digest.update(("%s|%s|%s\n" % (INDEX_VERSION, CHUNKER_VERSION, TOKENIZER_VERSION)).encode())
+    for path in sorted(kb_dir.rglob("*")):
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        if path.suffix.lower() not in SUPPORTED_SUFFIXES:
+            continue
+        digest.update(path.relative_to(kb_dir).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
     return digest.hexdigest()
 
 
