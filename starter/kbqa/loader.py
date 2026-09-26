@@ -66,7 +66,14 @@ class Document:
             "doc_id": self.doc_id,
             "title": self.title,
             "type": self.doc_type,
-            "state": self.status,
+            # 键名必须叫 `status`：`Retriever._eligible` 靠它判断"已废止"，
+            # 再用 `superseded_by` 指向的继任版生效日期把旧版挡在打分之外。
+            # 原来这里写成 `state`，读的一直是 `status`，两边对不上——
+            # 于是那条规则从未生效，废止版照常参与打分还常常排第一
+            # （C01 实测：KB-012 得 46.19，现行 KB-013 只有 17.70，
+            # 模型照着废止 v1 的"7 天内"答了，而 v2 是"外卖 24 小时内"）。
+            # `DocFacts.version_note` 也读 `status`，同样因此漏标"已废止"。
+            "status": self.status,
             "effective_from": self.effective_from.isoformat() if self.effective_from else None,
             "superseded_by": self.superseded_by,
             "stores": self.stores,

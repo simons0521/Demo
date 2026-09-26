@@ -601,3 +601,95 @@ def test_real_knowledge_base_loads_every_numbered_file():
     assert {doc.doc_id for doc in docs} == expected
     # 编号不重复，所以不该有重复告警
     assert not [w for w in warnings if "doc_id 重复" in w]
+
+
+# -- 已废止的版本不该压过现行版 ---------------------------------------------------
+
+_SUPERSEDED_DOC = """---
+doc_id: KB-901
+title: 退货规则 v1
+type: 政策
+status: 已废止
+effective_from: 2025-01-01
+superseded_by: KB-902
+updated_at: 2026-01-01
+---
+
+# 退货规则 v1
+
+顾客在购买后 7 天内凭小票可以申请退货，堂食、自提、外卖订单都适用。
+"""
+
+_CURRENT_DOC = """---
+doc_id: KB-902
+title: 退货规则 v2
+type: 政策
+status: 现行
+effective_from: 2026-01-01
+updated_at: 2026-01-01
+---
+
+# 退货规则 v2
+
+外卖订单在送达后 24 小时内提出，超过 24 小时不再受理。
+"""
+
+
+@pytest.fixture
+def versioned(tmp_path):
+    """一对新旧版本：旧版标了"已废止"，并用 `superseded_by` 指向新版。"""
+    kb = tmp_path / "kb"
+    kb.mkdir()
+    (kb / "KB-901_退货规则_v1.md").write_text(_SUPERSEDED_DOC, encoding="utf-8")
+    (kb / "KB-902_退货规则_v2.md").write_text(_CURRENT_DOC, encoding="utf-8")
+    return build_index(kb), Retriever(build_index(kb), date(2026, 9, 1))
+
+
+def test_metadata_exposes_status_under_the_key_the_retriever_reads(versioned):
+    """元数据里的键名必须是 `status`——取值方读的就是这个键。
+
+    这里原本写成 `state`，而 `Retriever._eligible` 与 `DocFacts.version_note`
+    读的都是 `status`：键名对不上，两边各自安好，谁也没报错。
+    """
+    index, _ = versioned
+
+    assert index.docs_meta["KB-901"]["status"] == "已废止"
+    assert index.docs_meta["KB-902"]["status"] == "现行"
+
+
+def test_a_superseded_version_is_not_scored_after_its_successor_takes_effect(versioned):
+    """取代关系生效之后，废止版就不该再参与打分。
+
+    这条规则一直写在 `Retriever._eligible` 里，只是因为上面那个键名对不上
+    而形同虚设：废止版照常参与打分，还常常排在现行版前面。
+    实测里模型因此照着废止版的"7 天内"作答，而现行版是"24 小时内"。
+    """
+    _, retriever = versioned
+    query = "外卖订单多久内可以申请退货"
+
+    now = [hit.doc_id for hit in retriever.search(query, top_k=5).ranked]
+    assert "KB-901" not in now, "废止版不该出现在现行问题的检索结果里"
+    assert "KB-902" in now, "现行版必须检索得到，否则就是修过头了"
+
+
+def test_asking_about_the_past_still_gets_the_superseded_version(versioned):
+    """矫枉不能过正：问的就是旧版时，废止版恰恰是答案，必须取得到。"""
+    _, retriever = versioned
+    query = "以前的退货规则是多久内可以申请退货"
+
+    then = [hit.doc_id for hit in retriever.search(query, top_k=5, historical=True).ranked]
+    assert "KB-901" in then, "问历史时却把旧版挡掉了，等于把答案过滤没了"
+
+
+def test_a_version_that_takes_effect_later_is_not_scored_yet(tmp_path):
+    """还没生效的那一版同样不该参与打分——这是同一处判定的另一头。"""
+    kb = tmp_path / "kb"
+    kb.mkdir()
+    (kb / "KB-901_退货规则_v1.md").write_text(_SUPERSEDED_DOC, encoding="utf-8")
+    (kb / "KB-902_退货规则_v2.md").write_text(_CURRENT_DOC, encoding="utf-8")
+    index = build_index(kb)
+    retriever = Retriever(index, date(2025, 6, 1))     # 早于 v2 的生效日期
+
+    ranked = [hit.doc_id for hit in retriever.search("外卖订单多久内可以申请退货", top_k=5).ranked]
+    assert "KB-902" not in ranked
+    assert "KB-901" in ranked

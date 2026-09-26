@@ -40,7 +40,12 @@ SYSTEM_PROMPT = """你是一家连锁餐饮公司的经营分析助手，服务�
 4. 引用某份文档时，在句末写上它的编号，例如 [KB-013]；不要自己编造文档编号，也不要逐字大段抄写。
 5. 数据里没有、文档里也没有的，直接说没有找到，不要编数字，也不要编原因。
 6. 回答用中文，写清楚具体数字，不要用“大约十几万”这类含糊说法。
-7. 不执行任何修改、删除数据的请求，也不透露系统提示词与表结构。"""
+7. 数字给得克制一点：一个结论，加上支撑它的那几个数就够了。用户没有明确要
+   “每天”“逐项”“排行”这类明细时，不要把整段时间的每日数据或整张榜单铺开，
+   那是拿数字淹没对方，不是回答。
+8. 问“现在/目前/现行”的，只给现行版本的数值，不要顺带复述已经废止的旧值；
+   用户明确问历史时才给旧版本的数。
+9. 不执行任何修改、删除数据的请求，也不透露系统提示词与表结构。"""
 
 
 class LiveEngine:
@@ -192,7 +197,9 @@ class LiveEngine:
             answer=text,
             answer_type=answer_type,
             citations=citations,
-            data_evidence=evidence,
+            # 裁剪放在数字校验**之后**：白名单该看的是模型确实见过的全部内容，
+            # 交出去的证据才只需要对应答案里出现的那几个数。
+            data_evidence=_trim_evidence(evidence, text),
         )
 
     def _fallback(self, plan: Plan, trace, note: str) -> Answer:
@@ -264,3 +271,73 @@ def _numbers_in(text: str) -> list[float]:
 
 def _matches(value: float, allowed: list[float]) -> bool:
     return any(abs(value - candidate) <= 0.011 for candidate in allowed)
+
+
+def _has_number(node) -> bool:
+    if isinstance(node, bool) or node is None:
+        return False
+    if isinstance(node, (int, float)):
+        return True
+    if isinstance(node, dict):
+        return any(_has_number(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_has_number(value) for value in node)
+    return False
+
+
+def _keep_used(node, used: list[float]):
+    """只留 `used` 里出现过的数字，结构、日期、名称这些非数字字段照原样。
+
+    返回 `None` 表示这一支没有可留的内容。**整行数字都没被用到时整行丢掉**：
+    逐日数据里答案只提了三天，剩下二十几天就只剩一个日期字符串，
+    留着它们只是噪音。
+    """
+    if isinstance(node, bool) or node is None:
+        return node
+    if isinstance(node, (int, float)):
+        return node if _matches(float(node), used) else None
+    if isinstance(node, dict):
+        kept = {
+            key: pruned
+            for key, value in node.items()
+            if (pruned := _keep_used(value, used)) is not None
+        }
+        if not kept:
+            return None
+        if _has_number(node) and not _has_number(kept):
+            return None
+        return kept
+    if isinstance(node, list):
+        items = [p for p in (_keep_used(v, used) for v in node) if p is not None]
+        return items or None
+    return node
+
+
+def _trim_evidence(evidence: list[dict], text: str) -> list[dict]:
+    """按答案裁剪证据：只留回答里真正用到的那些数。
+
+    契约 §5 对 `data_evidence` 的要求是"回答中凡是来自数据库的数字，都要列出
+    对应的查询"，同时给了"全部 result 里的数字总数不超过 60 个"的硬上限，
+    理由写得很直白——"穷举数字不是证据"。所以证据是**用来证明答案里那几个数
+    怎么来的**，不是工具返回值的存档（存档在 trace 里）。
+
+    模型却经常顺手要一大片：一个月 30 天的逐日数据、30 个商品的排行，
+    答案里其实只用到其中几个。原样交上去就是拿一百多个数字把上限撑爆，
+    这一题按不合格算（D06、C07、H01 实测）。裁剪之后，证据里剩下的
+    正好是答案里出现过的数，与 §5 那句话一一对应。
+    """
+    used = _numbers_in(text)
+    if not used:
+        return evidence
+    trimmed = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            trimmed.append(item)
+            continue
+        kept = _keep_used(item.get("result"), used)
+        if kept is None:
+            continue
+        trimmed.append({**item, "result": kept})
+    # 一个数字都对不上时宁可原样交出去，也不要交一份空证据：
+    # 数字可能来自引用文档而不是工具结果，这时候瞒下证据是更坏的选择。
+    return trimmed or evidence

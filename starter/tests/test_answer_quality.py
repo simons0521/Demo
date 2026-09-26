@@ -1,12 +1,13 @@
-"""作答链路的回归测试：数字校验的误伤、工具标记泄漏、兜底答案的形状。
+"""作答链路的回归测试：数字校验的误伤、工具标记泄漏、证据与兜底答案的形状。
 
-这三件事都出在"模型说完了之后引擎怎么收尾"这一段，症状互不相干，
+这几件事都出在"模型说完了之后引擎怎么收尾"这一段，症状互不相干，
 根子上是同一类毛病：**引擎拿着一份不全的信息做判断，然后判错了方向。**
 
 * `_numbers_in` 把范围连字符读成负号 → 模型答对的数字被判成"编造"；
 * 白名单只收工具结果，不收**模型眼前看到的检索结果** → 引用文档也算编造；
 * 收尾时只看 `tool_calls` 空不空 → DeepSeek 写成正文的工具标记成了最终答案；
-* 兜底答案把整篇原文拼在 200 字正文前面 → 判回来的回答反而更难读。
+* 兜底答案把整篇原文拼在 200 字正文前面 → 判回来的回答反而更难读；
+* 证据把工具返回值原样交出去 → 答案只用了几个数，上限却按几十个算。
 
 真实数据集一直在换，所以除了"整篇文档不该被倒出来"那一条，
 其余全部用合成数据压行为，不写死任何真实数字。
@@ -22,7 +23,7 @@ from kbqa.answerer import Answerer
 from kbqa.entities import Catalog
 from kbqa.index import build_index
 from kbqa.llm import LLMReply
-from kbqa.live import LiveEngine, _numbers_in
+from kbqa.live import LiveEngine, _numbers_in, _trim_evidence
 from kbqa.planner import Plan
 from kbqa.retriever import Retriever
 from kbqa.schemas import Answer
@@ -214,6 +215,72 @@ def test_a_number_nobody_saw_is_still_caught():
     assert answer.answer == _RecordingAnswerer.TEMPLATE
     assert answerer.calls == 1
     assert "number_check_failed" in _kinds(trace)
+
+
+# -- 证据只证明答案里的数 ---------------------------------------------------------
+
+def test_the_evidence_carries_only_the_numbers_the_answer_used():
+    """证据是证明答案里那几个数怎么来的，不是工具返回值的存档。
+
+    契约 §5 一面要求"回答中凡是来自数据库的数字，都要列出对应的查询"，
+    一面给了"全部 result 里的数字总数不超过 60 个"的硬上限，理由写得很直白——
+    "穷举数字不是证据"。模型却常顺手要一个月的逐日数据，答案里只提了其中一天
+    （H01 实测：答案只用了几个数，证据里躺着 131 个）。
+    """
+    answerer = _RecordingAnswerer()
+    days = [
+        {
+            "date": "2026-06-%02d" % day,
+            "net_revenue": float(day * 10),
+            "orders": day,
+            "aov": 42.0,
+        }
+        for day in range(1, 31)
+    ]
+    client = _ScriptedClient("净营业额 120 元。", calls=[_call("daily_metrics", "{}")])
+    trace = Trace("t-trim", "6 月 12 日的净营业额是多少？")
+
+    answer = _engine(
+        client, answerer, run_tool=lambda name, params: {"days": days}
+    ).answer(_plan("6 月 12 日的净营业额是多少？"), trace, [])
+
+    assert answer.answer == "净营业额 120 元。"
+    kept = answer.data_evidence[0]["result"]["days"]
+    # 30 天里只有 6 月 12 日那天的数被答案用到，其余整行丢掉——
+    # 留着它们就只剩一个日期字符串，是噪音不是证据。
+    assert kept == [{"date": "2026-06-12", "net_revenue": 120.0}]
+
+
+def test_evidence_is_left_alone_when_the_answer_uses_none_of_it():
+    """一个数都对不上时宁可原样交出去，也不要交一份空证据。
+
+    答案里的数字可能来自引用文档而不是工具结果，这时候把工具证据瞒下来
+    是比"证据偏大"更坏的选择。
+    """
+    evidence = [
+        {"tool": "query_metrics", "params": {}, "result": {"net_revenue": 123.0}}
+    ]
+
+    assert _trim_evidence(evidence, "净营业额是 999 元。") == evidence
+
+
+def test_trimming_keeps_the_number_check_working():
+    """裁剪发生在数字校验之后：白名单该看的是模型**确实见过**的全部内容。
+
+    如果顺序反了，模型引用工具结果里某个自己没写进答案的数就会被判成编造。
+    """
+    days = [{"date": "2026-06-20", "net_revenue": 200.0, "orders": 20}]
+    answerer = _RecordingAnswerer()
+    client = _ScriptedClient("当天净营业额 200 元。", calls=[_call("daily_metrics", "{}")])
+    trace = Trace("t-trim-ok", "6 月 20 日的净营业额是多少？")
+
+    answer = _engine(
+        client, answerer, run_tool=lambda name, params: {"days": days}
+    ).answer(_plan("6 月 20 日的净营业额是多少？"), trace, [])
+
+    assert answer.answer == "当天净营业额 200 元。"
+    assert answerer.calls == 0
+    assert "number_check_failed" not in _kinds(trace)
 
 
 # -- 工具标记不能当答案 -----------------------------------------------------------
