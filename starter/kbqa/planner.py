@@ -201,7 +201,6 @@ class Planner:
         asks_why = E.has_any(text, E.WHY_WORDS)
         asks_target = E.has_any(text, E.TARGET_WORDS)
         asks_price = E.has_any(text, E.PRICE_WORDS)
-        asks_amount = E.has_any(text, ("多少", "几", "是多少", "有多少")) or asks_rank
 
         asks_business = E.has_any(text, E.BUSINESS_WORDS)
         abnormal = E.is_abnormal(text)
@@ -248,15 +247,19 @@ class Planner:
         else:
             plan.kind, plan.intent = "summary", "data"
 
-        # 路由：问“多少/多久/几”的就是要数字，问“为什么/原因”的就是要说法。
-        # 两边都走一遍太慢，没必要。
-        if E.has_any(text, ("多少", "多久", "几")):
-            plan.intent = "data"
-            if plan.kind in ("doc", "anomaly", "target", "price"):
-                plan.kind = "summary"
-        elif E.has_any(text, ("为什么", "原因", "怎么回事", "咋回事")):
-            plan.intent, plan.kind = "doc", "doc"
-
+        # 路由到这里就定完了。上面用的信息——政策词、指标是不是显式、
+        # 有没有一个数据库算得出来的口子、主体够不够——比"句子里出现了哪个词"
+        # 完整得多，没有理由再拿一句话把它推翻。
+        #
+        # 这里原本有一段覆盖，两个分支分别踩了两个坑：
+        #   * `多少/多久/几 -> 查数`：把政策题（"外卖订单多久内可以申请退款"）
+        #     和文档题（"供应商最后赔了我们多少钱"）一起拉去取数，答出一个
+        #     不相干的数字；它顺手写的 `intent = "data"` 还会让下面"现在"的
+        #     区间还原失效，问题被答成"数据库里没有这条"。
+        #   * `为什么/原因 -> 查文档`：把异常题的两条腿砍掉一条，
+        #     "为什么 8 月 17 日一分钱营业额都没有"只剩原因、给不出数字。
+        # "为什么"不必在这里处理：`asks_why` 已经存进 slots，作答器在取数
+        # 路线上会自己追加原因块（`_answer_data`），有就答、没有就说没找到。
         plan.slots["asks_why"] = bool(asks_why or abnormal)
         plan.slots["about_names"] = E.asks_about_names(text)
         plan.slots["two_part"] = False
@@ -277,7 +280,6 @@ class Planner:
             plan.window = (self.data_period["start"], self.data_period["end"])
         plan.needs_data = plan.kind not in ("doc",)
         plan.needs_docs = plan.intent in ("doc", "hybrid")
-        _ = asks_amount
         if spec.first_month:
             plan.notes.append("按“首月”处理：以该商品在数据库里的首个销售日所在自然月为区间。")
 
