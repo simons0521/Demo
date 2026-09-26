@@ -16,9 +16,11 @@ from pathlib import Path
 import pytest
 
 from kbqa.chunker import CHUNK_SIZE, chunk_document
-from kbqa.index import content_key
+from kbqa.index import build_index, content_key, load_index
 from kbqa.loader import Document, load_knowledge_base
 from kbqa.tokenizer import content_tokens, normalise, tokenize
+
+import kbqa.index as index_module
 
 KB_ROOT = Path(__file__).resolve().parents[2] / "knowledge_base"
 
@@ -198,7 +200,263 @@ def test_files_without_a_doc_id_are_skipped_with_a_warning(tmp_path):
     assert any("README.md" in warning for warning in warnings)
 
 
+# -- 切块 -----------------------------------------------------------------------
+
+
+def _document(text: str, doc_id: str = "KB-900", title: str = "合成文档") -> Document:
+    """内存里的文档，不用落盘——切块只吃 `Document`。"""
+    return Document(doc_id=doc_id, title=title, text=text, path=Path("%s_x.md" % doc_id), fmt="md")
+
+
+def _lines_of_text(text: str) -> set[str]:
+    return {line.strip() for line in text.splitlines() if line.strip()}
+
+
+def _chunk_lines(chunks) -> set[str]:
+    return {line.strip() for chunk in chunks for line in chunk.source_text.splitlines() if line.strip()}
+
+
+_SECTION_DOC = """\
+# 手册
+
+## 一、营业时间
+
+门店营业时间为 10:00 至 22:00。节假日照常营业。
+
+## 二、退款
+
+外卖订单在订单送达后 24 小时内可以申请退款。
+"""
+
+
+def _long_doc() -> str:
+    """一篇远超 CHUNK_SIZE 的文档，最后一行是只出现一次的标记。"""
+    lines = ["# 长文档"]
+    for number in range(1, 60):
+        lines.append("第 %02d 条：门店营业时间与排班规则说明，适用于全部直营门店。" % number)
+    lines.append("尾行标记 Z9 仅此一处")
+    return "\n".join(lines)
+
+
+def test_no_line_is_lost_including_the_tail():
+    """切块**不许丢正文**——这是它最要命的错法。
+
+    原实现是 `range(0, len(text) - CHUNK_SIZE, CHUNK_SIZE)`：上界少了整整一块，
+    最后 `CHUNK_SIZE` 个字符直接不进索引。真实知识库里 35 篇文档**每一篇**
+    都丢字，合计 6107 字（18.6%）；一篇 587 字的文档只索引了前 300 字。
+    正文丢了不会有任何报错，只会莫名其妙地召不回——比抛异常难查得多。
+    """
+    text = _long_doc()
+    chunks = chunk_document(_document(text))
+
+    missing = _lines_of_text(text) - _chunk_lines(chunks)
+    assert not missing, "这些正文没有进索引：%s" % sorted(missing)[:5]
+    assert "尾行标记 Z9 仅此一处" in _chunk_lines(chunks)
+
+
+def test_the_whole_document_is_covered_not_just_the_head():
+    """一篇 587 字的文档要全部进索引，而不是只有前 300 字。
+
+    原实现只在**短于 CHUNK_SIZE** 时才走"整篇一块"的兜底分支，
+    落在 300 字到 600 字之间的文档恰好被砍掉尾巴。
+    """
+    #: 每行都得不一样。全用同一句的话，集合去重之后前 300 字就把"所有行"
+    #: 覆盖完了，这条测试会假绿——不会红的测试比没有测试更危险。
+    text = "# 通知\n\n" + "".join(
+        "第 %02d 条：营业时间调整为 09:00 至 21:00，请各店按新时间排班。\n" % number
+        for number in range(1, 9)
+    )
+    assert 300 < len(text) < 600  # 正好落在会丢尾巴的区间里
+    chunks = chunk_document(_document(text))
+    missing = _lines_of_text(text) - _chunk_lines(chunks)
+    assert not missing, "后半篇没进索引：%s" % sorted(missing)
+
+
+def test_prose_chunks_stay_within_the_chunk_size():
+    """正常长度的句子，切出来的一块不能超过 `CHUNK_SIZE`。"""
+    chunks = chunk_document(_document(_long_doc()))
+    over = [chunk.chunk_id for chunk in chunks if len(chunk.text) > CHUNK_SIZE]
+    assert not over, "这些块超长：%s" % over
+
+
+_TABLE_HEADER = "| 商品编码 | 商品名称 | 门店 | 售价 |"
+_TABLE_SEP = "| --- | --- | --- | --- |"
+
+
+def _table_doc(rows: int = 40) -> str:
+    body = [_TABLE_HEADER, _TABLE_SEP]
+    for number in range(1, rows + 1):
+        body.append("| P%03d | 商品%03d | S%02d | %d.00 |" % (number, number, number % 5 + 1, number))
+    return "# 价目表\n\n" + "\n".join(body) + "\n"
+
+
+def test_a_table_becomes_a_table_chunk_with_its_header():
+    """整表切块要产出 `kind="table"` 与表头。
+
+    这两个字段现在是死代码：原实现一律 `kind="text"`、`table_header=[]`，
+    于是 `units.py` 的表格分支永远进不去，`docfacts.render_row` 也拼不出
+    "商品名称：三文鱼，售价：35.00" 这种可读的行——答案里会直接甩一根竖线。
+    """
+    chunks = chunk_document(_document(_table_doc()))
+    tables = [chunk for chunk in chunks if chunk.kind == "table"]
+    assert tables, "整张表一块都没切成 table"
+    assert all(chunk.table_header == ["商品编码", "商品名称", "门店", "售价"] for chunk in tables)
+
+
+def test_a_table_is_not_cut_away_from_its_header():
+    """表格可以分成几块，但**每一块都要带表头**。
+
+    KB-040 的表有 23 行 1149 字，超过 CHUNK_SIZE 必须拆；
+    拆出去的那几行如果没有表头，"| P007 | 商品007 | S03 | 7.00 |"
+    就只剩一串光秃秃的数字，既检索不到"售价"，也拼不成一句人话。
+    """
+    text = _table_doc()
+    chunks = chunk_document(_document(text))
+    tables = [chunk for chunk in chunks if chunk.kind == "table"]
+    assert len(tables) > 1, "这张表本来就该拆成多块，否则测不到拆表"
+
+    for chunk in tables:
+        assert _TABLE_HEADER in chunk.source_text, "这块表丢了表头：%s" % chunk.chunk_id
+
+    # 表格行必须整行进索引，不能被拦腰切断
+    assert not (_lines_of_text(text) - _chunk_lines(chunks))
+
+
+def test_heading_path_is_recorded_without_the_hashes():
+    """块的 `heading` 是标题路径，用 ` > ` 连接，**不带 `#`**。
+
+    `units.py` 拿 `chunk.heading.split(" > ")` 的结果去和
+    `sentence.strip().lstrip("#")` 比对（第 119、145 行）；
+    带着 `#` 的话比对永远不相等，标题就永远标不成 `kind="heading"`。
+    """
+    chunks = chunk_document(_document(_SECTION_DOC))
+    by_heading = {chunk.heading: chunk.source_text for chunk in chunks}
+
+    refund = [chunk for chunk in chunks if "外卖订单" in chunk.source_text]
+    assert len(refund) == 1
+    assert refund[0].heading == "手册 > 二、退款"
+    assert not any(part.startswith("#") for part in refund[0].heading.split(" > "))
+
+    hours = [chunk for chunk in chunks if "10:00 至 22:00" in chunk.source_text]
+    assert len(hours) == 1
+    assert hours[0].heading == "手册 > 一、营业时间"
+    assert by_heading  # 每块都要有 heading，不能是空串
+
+
+def test_chunk_ids_are_unique():
+    chunks = chunk_document(_document(_long_doc()))
+    ids = [chunk.chunk_id for chunk in chunks]
+    assert len(ids) == len(set(ids))
+    assert all(chunk.doc_id == "KB-900" for chunk in chunks)
+
+
+# -- 索引缓存 -------------------------------------------------------------------
+
+
+def _write_kb_v2(root: Path, notice: str = "自 2026 年 3 月 1 日起，营业时间调整为 09:00 至 21:00。") -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "KB-910_营业时间通知.md").write_text(
+        "# 营业时间通知\n\n" + notice + "\n", encoding="utf-8"
+    )
+
+
+def test_content_key_is_stable_for_the_same_content(tmp_path):
+    kb_a = tmp_path / "a"
+    kb_b = tmp_path / "b"
+    _write_kb_v2(kb_a)
+    _write_kb_v2(kb_b)
+    assert content_key(kb_a) == content_key(kb_a)
+    # 换个目录、内容一样，键也该一样（键里不能混进绝对路径）
+    assert content_key(kb_a) == content_key(kb_b)
+
+
+def test_content_key_changes_when_the_knowledge_base_changes(tmp_path):
+    """内容变了，键就得变。
+
+    原实现只哈希三个版本号（`INDEX_VERSION|CHUNKER_VERSION|TOKENIZER_VERSION`），
+    **一点知识库内容都不看**。改了正文而没改版本号，键原样不变，
+    缓存永远"命中"，跑的还是旧索引。
+    """
+    kb = tmp_path / "kb"
+    _write_kb_v2(kb)
+    before = content_key(kb)
+
+    _write_kb_v2(kb, notice="自 2026 年 4 月 1 日起，营业时间调整为 08:00 至 20:00。")
+    assert content_key(kb) != before, "正文改了，缓存键却没变"
+
+    # 改文件名也算改内容
+    _write_kb_v2(kb)
+    renamed = content_key(kb)
+    (kb / "KB-910_营业时间通知.md").rename(kb / "KB-910_营业时间调整通知.md")
+    assert content_key(kb) != renamed
+
+
+def test_a_stale_cache_is_not_served(tmp_path):
+    """端到端：正文改了之后，`load_index` 必须给出新内容。
+
+    仓库里那份 `.cache/index.json` 就是这么过期并且被提交进 git 的。
+    """
+    kb = tmp_path / "kb"
+    cache = tmp_path / "index.json"
+    _write_kb_v2(kb)
+
+    first = load_index(kb, cache)
+    assert any("09:00" in chunk.text for chunk in first.chunks)
+
+    _write_kb_v2(kb, notice="自 2026 年 4 月 1 日起，营业时间调整为 08:00 至 20:00。")
+    second = load_index(kb, cache)  # 不给 rebuild，缓存该自己失效
+
+    assert any("08:00" in chunk.text for chunk in second.chunks)
+    assert not any("09:00" in chunk.text for chunk in second.chunks), "还在吃旧缓存"
+
+
+def test_a_fresh_cache_is_reused(tmp_path, monkeypatch):
+    """内容没变时要真的复用缓存——每次都重建就等于没有缓存。"""
+    cache = tmp_path / "index.json"
+    _write_kb_v2(tmp_path / "kb")
+    load_index(tmp_path / "kb", cache)
+    assert cache.exists()
+
+    def boom(_kb_dir):
+        raise AssertionError("缓存应该命中，不该重建")
+
+    monkeypatch.setattr(index_module, "build_index", boom)
+    index = load_index(tmp_path / "kb", cache)
+    assert index.chunks
+
+
+def test_a_corrupt_cache_is_rebuilt(tmp_path):
+    """缓存文件坏了（写了一半、手工改过）要能自己重建，不能让服务起不来。"""
+    kb = tmp_path / "kb"
+    cache = tmp_path / "index.json"
+    _write_kb_v2(kb)
+    cache.write_text("{ 这不是 JSON", encoding="utf-8")
+
+    index = load_index(kb, cache)
+    assert index.chunks
+    assert cache.read_text(encoding="utf-8").startswith("{")  # 已经被正常内容覆盖
+
+
 # -- 真实知识库的不变量（不写死任何数字） ----------------------------------------
+
+
+def test_no_line_of_the_real_knowledge_base_is_lost():
+    """真实知识库**每一行**正文都要出现在某个块里。
+
+    断言完全由目录内容推出来：换知识库也成立，且不写死任何数字。
+    """
+    if not KB_ROOT.exists():
+        pytest.skip("没有 %s，跳过" % KB_ROOT)
+
+    documents, _ = load_knowledge_base(KB_ROOT)
+    assert documents, "一篇文档都没加载出来，测试本身失效了"
+
+    lost: dict[str, list[str]] = {}
+    for document in documents:
+        missing = _lines_of_text(document.text) - _chunk_lines(chunk_document(document))
+        if missing:
+            lost[document.doc_id] = sorted(missing)[:3]
+    assert not lost, "有文档丢了正文：%s" % lost
 
 
 def test_real_knowledge_base_loads_every_numbered_file():
