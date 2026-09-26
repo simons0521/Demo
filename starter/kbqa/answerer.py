@@ -193,6 +193,9 @@ class Answerer(HybridAnswers):
             window=window,
             numeric=bool(plan.slots.get("metric_explicit")) and plan.needs_data,
             historical=bool(plan.slots.get("historical")),
+            # 没配 Key 时走的就是这条模板路径（评审第一步就是这么跑的），
+            # 调试面板同样要有检索明细：只加 trace 字段，返回值不变。
+            explain=True,
         )
         if trace is not None:
             trace.step("search", result.as_trace(), started=started)

@@ -16,7 +16,7 @@ from .index import load_index
 from .live import LiveEngine
 from .llm import LLMClient, LLMError
 from .planner import Planner
-from .retriever import Retriever
+from .retriever import Retriever, SearchResult
 from .sessions import SessionStore
 from .toolspec import TOOL_NAMES, TOOLS
 from .tools import DataTools
@@ -86,18 +86,32 @@ class Service:
     def metrics_daily(self, start: str, end: str, store_id=None, product_id=None) -> dict:
         return self.tools.daily_metrics(start, end, store_id, product_id)
 
+    def search_detail(self, query: str, top_k: int = 5) -> SearchResult:
+        """检索一次，连调试明细一起返回（契约 §6）。
+
+        契约 §4 要求 `/api/retrieve` 与问答链路是**同一套检索实现**，所以这里
+        就是那唯一一处：`retrieve()` 与 `run_tool` 都走它，区别只在返回形状。
+        """
+        wanted = max(1, min(int(top_k or 5), len(self.index.chunks) or 1))
+        return self.retriever.search(query or "", top_k=wanted, explain=True)
+
     def retrieve(self, query: str, top_k: int = 5) -> dict:
         """契约 §4：片段够就恰好给 top_k 条，不够才少给。
 
         `top_k` 大于索引里的片段总数时按总数封顶——这正是契约允许少给的那种情况。
+
+        **返回形状是冻结的**（只有 `results`，每条四个字段）：它会进到发给模型的
+        工具消息里，而"模型有没有编数字"的判定是从那条消息抽数字做的，
+        多一个字段就可能让判定变样。调试明细走 trace，不走这里。
         """
-        wanted = max(1, min(int(top_k or 5), len(self.index.chunks) or 1))
-        result = self.retriever.search(query or "", top_k=wanted)
+        result = self.search_detail(query, top_k)
         return {"results": [hit.as_result() for hit in result.hits]}
 
     # -- 工具执行（live 模式下由模型驱动） ---------------------------------------
 
-    def run_tool(self, name: str, params: dict) -> dict:
+    def run_tool(self, name: str, params: dict, *, trace: Optional[Trace] = None) -> dict:
+        """执行一次工具调用。`trace` 给了才落痕——`/api/retrieve` 走的是同一套
+        检索，但它不该在别人身上留下步骤。"""
         if name not in TOOL_NAMES:
             return {"error": "没有这个工具：%s，可用工具：%s" % (name, "、".join(TOOL_NAMES))}
         schema = next(
@@ -125,7 +139,15 @@ class Service:
                 return {"error": "缺少必填参数 %s" % key}
         try:
             if name == "search_kb":
-                return self.retrieve(cleaned["query"], cleaned.get("top_k", 5))
+                started = time.perf_counter()
+                detail = self.search_detail(cleaned["query"], cleaned.get("top_k", 5))
+                if trace is not None:
+                    # 契约 §6：改写后的检索查询、每个片段的 doc_id/chunk_id/分数、
+                    # 哪些被过滤掉及为什么，都要在 trace 里看得见。live 路径的检索
+                    # 是模型调工具触发的，只有这里能落痕——原来只记了工具入参，
+                    # 面板上"这次检索到了什么"是空的。
+                    trace.step("search", detail.as_trace(), started=started)
+                return {"results": [hit.as_result() for hit in detail.hits]}
             return getattr(self.tools, name)(**cleaned)
         except (TypeError, ValueError) as exc:
             return {"error": "工具 %s 执行失败：%s" % (name, exc)}
@@ -203,7 +225,10 @@ class Service:
         engine = LiveEngine(
             client,
             self.answerer,
-            self.run_tool,
+            # 包一层而不是直接传 `self.run_tool`：live 路径的检索也要进 trace
+            # （契约 §6），而 `LiveEngine` 的 callable 签名固定是 `(name, params)`，
+            # 所以把 trace 绑在这里。**两个参数不能动**，那侧不用改。
+            lambda name, params: self.run_tool(name, params, trace=trace),
             self.settings.today.isoformat(),
             self.data_period,
             budget=self.settings.chat_budget,
