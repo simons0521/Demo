@@ -63,8 +63,16 @@ class LiveEngine:
             remaining = deadline - time.perf_counter()
             if remaining < 10:
                 raise LLMError("budget", "整体耗时接近 /api/chat 的时限，已停止调用模型")
+            # 最后一轮**不带工具**：该查的已经查完了，再让模型调一次只会把这一轮
+            # 也耗掉，然后整题按"没收敛"拒答——用户等了几十秒、数据也拿到了，
+            # 最后什么都拿不到。不发 `tools`，`reply.tool_calls` 必然是空的
+            # （`LLMClient._body` 在没有工具时整个字段都不发），直接进 `_finalise`，
+            # 不用赌模型听不听话。
             reply = self.client.chat_with_retry(
-                messages, TOOLS, budget=remaining, on_call=trace.llm
+                messages,
+                None if round_index >= MAX_TOOL_ROUNDS else TOOLS,
+                budget=remaining,
+                on_call=trace.llm,
             )
             if not reply.tool_calls:
                 return self._finalise(plan, reply.content, evidence, retrieved, trace)
