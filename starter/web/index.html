@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>经营看板 + 问答服务</title>
+<!-- 空 favicon：浏览器默认会去要 /favicon.ico，这条能让控制台少一个 404 -->
+<link rel="icon" href="data:,">
+<!-- 零构建、零外链：不引任何远端资源、不装字体、不上图表库，评审在断网环境里
+     也能跑。折线图是手写 SVG（app.js 的 renderTrend）。
+     测试里有一条**钝**守卫盯着这件事，它直接找远端地址与远端库的字样，**连注释
+     里出现都算数**——所以这里只说结论，不把那些字样写出来。守卫钝一点才拦得住
+     真的外链；想让守卫放行，请改代码，不要改那条测试。 -->
+<link rel="stylesheet" href="/style.css">
+<!-- 走普通脚本 + defer，不用模块脚本：没有构建步骤，也不挑环境
+     （模块脚本在部分内网代理下会被 CORS 挡掉）。 -->
+<script defer src="/app.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <h1>经营看板 + 问答服务</h1>
+  <nav class="tabs">
+    <a href="#/dashboard" data-tab="dashboard">看板</a>
+    <a href="#/chat" data-tab="chat">问答</a>
+    <a href="#/debug" data-tab="debug">调试面板</a>
+  </nav>
+  <span id="mode-badge" class="badge badge-unknown" title="没有配 Key 时服务照样能起，走模板作答">
+    连接中…
+  </span>
+</header>
+
+<main>
+  <!-- ① 看板 ---------------------------------------------------------------- -->
+  <section id="view-dashboard" class="view" hidden>
+    <div class="toolbar">
+      <label>开始 <input type="date" id="dash-start"></label>
+      <label>结束 <input type="date" id="dash-end"></label>
+      <label>门店 <select id="dash-store"><option value="">全部门店</option></select></label>
+      <button id="dash-reload" type="button">刷新</button>
+      <span id="dash-hint" class="hint"></span>
+    </div>
+
+    <h2>概览</h2>
+    <div id="dash-summary" class="cards"></div>
+
+    <h2>营业额趋势</h2>
+    <div id="dash-trend" class="panel"></div>
+
+    <h2>Top 10 商品</h2>
+    <div id="dash-top" class="panel"></div>
+
+    <h2>数据质量</h2>
+    <div id="dash-quality" class="panel"></div>
+  </section>
+
+  <!-- ② 对话框 -------------------------------------------------------------- -->
+  <section id="view-chat" class="view" hidden>
+    <p class="hint" id="chat-hint">
+      同一个 session 里的多次提问算一段对话，可以直接追问（“那 7 月呢”）。
+    </p>
+    <div id="chat-log" class="chat-log"></div>
+    <form id="chat-form" class="chat-form">
+      <textarea id="chat-input" rows="2" placeholder="问一句，比如：618 当天 S02 的牛肉poke 卖了多少份？达到目标了吗？"></textarea>
+      <button id="chat-send" type="submit">发送</button>
+    </form>
+    <p class="hint" id="chat-status"></p>
+    <button id="chat-reset" type="button" class="link">开一段新对话</button>
+  </section>
+
+  <!-- ③ 调试面板 ------------------------------------------------------------ -->
+  <section id="view-debug" class="view" hidden>
+    <div class="toolbar">
+      <label>trace_id <input type="text" id="debug-id" placeholder="t-20260901-0001"></label>
+      <button id="debug-load" type="button">查看</button>
+      <button id="debug-recent" type="button">最近几次问答</button>
+    </div>
+    <div id="debug-body" class="panel"></div>
+  </section>
+</main>
+
+</body>
+</html>

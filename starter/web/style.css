@@ -1,0 +1,214 @@
+/* 零构建：没有预处理器、没有外链字体，全部用系统字体栈。 */
+
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --line: #e3e6ea;
+  --text: #1f2328;
+  --muted: #667085;
+  --accent: #1f6feb;
+  --warn: #9a6700;
+  --warn-bg: #fff8e5;
+  --bad: #b42318;
+  --bad-bg: #fef3f2;
+  --ok: #067647;
+  --ok-bg: #ecfdf3;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+
+code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+/* -- 顶栏 ------------------------------------------------------------------ */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 10px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.topbar h1 { margin: 0; font-size: 16px; font-weight: 600; }
+.tabs { display: flex; gap: 4px; }
+.tabs a {
+  padding: 5px 12px;
+  border-radius: 6px;
+  color: var(--muted);
+  text-decoration: none;
+}
+.tabs a.active { background: #eaf1fd; color: var(--accent); font-weight: 600; }
+
+.badge {
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.badge-live { background: var(--ok-bg); color: var(--ok); }
+.badge-mock { background: var(--warn-bg); color: var(--warn); }
+.badge-unknown { background: #eef0f3; color: var(--muted); }
+
+main { padding: 20px; max-width: 1180px; margin: 0 auto; }
+h2 { font-size: 15px; margin: 24px 0 10px; }
+h3 { font-size: 13px; margin: 16px 0 6px; color: var(--muted); }
+.hint { color: var(--muted); font-size: 13px; }
+.error { color: var(--bad); }
+
+/* -- 工具条 ---------------------------------------------------------------- */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.toolbar label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+input, select, textarea, button {
+  font: inherit;
+  color: inherit;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+button { cursor: pointer; }
+button:hover { border-color: #c7ccd4; }
+button:disabled { cursor: default; opacity: .55; }
+button.link {
+  border: none;
+  background: none;
+  color: var(--accent);
+  padding: 4px 0;
+  text-align: left;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+}
+
+/* -- 看板 ------------------------------------------------------------------ */
+
+.cards { display: flex; gap: 12px; flex-wrap: wrap; }
+.card {
+  flex: 1 1 150px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.card .label { color: var(--muted); font-size: 12px; }
+.card .value { font-size: 22px; font-weight: 600; margin-top: 2px; }
+.card .unit { font-size: 13px; font-weight: 400; color: var(--muted); margin-left: 3px; }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; }
+tbody tr:last-child td { border-bottom: none; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+.trend { width: 100%; height: auto; display: block; }
+.trend .axis { stroke: var(--line); }
+.trend .grid { stroke: #f0f2f5; }
+.trend .line { fill: none; stroke: var(--accent); stroke-width: 2; }
+.trend .dot { fill: var(--accent); }
+.trend text { fill: var(--muted); font-size: 10px; }
+
+/* -- 问答 ------------------------------------------------------------------ */
+
+.chat-log { display: flex; flex-direction: column; gap: 12px; margin-bottom: 12px; }
+.turn { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; background: var(--panel); }
+.turn.q { background: #eef2f7; border-color: #dde3ea; }
+.turn .who { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.answer { white-space: pre-wrap; }
+.answer strong { font-weight: 600; }
+
+.answer-type {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #eef0f3;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  margin-left: 6px;
+}
+.answer-type.hybrid { background: #eaf1fd; color: var(--accent); }
+.answer-type.data { background: var(--ok-bg); color: var(--ok); }
+.answer-type.doc { background: #f4ecfd; color: #7839ee; }
+.answer-type.refusal, .answer-type.clarify { background: var(--warn-bg); color: var(--warn); }
+
+.chat-form { display: flex; gap: 10px; align-items: flex-end; }
+.chat-form textarea { flex: 1; resize: vertical; }
+
+details {
+  margin-top: 8px;
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+}
+details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+details[open] summary { margin-bottom: 8px; }
+
+pre {
+  margin: 6px 0;
+  padding: 9px 11px;
+  background: #f7f8fa;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+blockquote {
+  margin: 4px 0;
+  padding: 4px 0 4px 10px;
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+}
+
+/* -- 调试面板 -------------------------------------------------------------- */
+
+.steps { list-style: none; margin: 0; padding: 0; }
+.steps > li {
+  display: flex;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+}
+.steps > li:last-child { border-bottom: none; }
+.step-name { font-weight: 600; min-width: 108px; }
+.step-name.search { color: var(--accent); }
+.step-name.tool { color: var(--ok); }
+.step-time { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.tag {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: #eef0f3;
+  color: var(--muted);
+  font-size: 12px;
+}
+.tag.warn { background: var(--warn-bg); color: var(--warn); }
+.tag.bad { background: var(--bad-bg); color: var(--bad); }
+.tag.note { background: #eef0f3; color: var(--muted); }
+
+.errors { border-left: 3px solid var(--bad); padding-left: 10px; margin: 8px 0; }

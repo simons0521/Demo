@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date
 from typing import Any, Optional
 
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .config import load_settings
 from .service import Service
 
 app = FastAPI(title="经营看板 + 问答服务", version="0.9.3")
@@ -188,3 +191,18 @@ def metrics_top_products(
 def traces(limit: int = Query(20, ge=1, le=100)) -> dict:
     """最近几次问答的摘要，调试面板用来挑一条进去看。要看细节走 `/api/trace/{id}`。"""
     return {"traces": service().traces.recent(limit)}
+
+
+# -- 前端（零构建的静态三件套） ----------------------------------------------------
+#
+# 挂载点必须在**所有 `/api/*` 路由之后**：Starlette 按注册顺序匹配，写在前面
+# 会把接口整个盖住。
+#
+# `is_dir()` 守卫是给契约 §7.2 的"干净环境也要能起"留的：`web/` 不在时降级成
+# 404，而不是在**导入期**抛异常——导入期一炸，整个服务连同 API 全起不来。
+# 目录在仓库里（`starter/web/`），正常情况下走的是上面那条分支。
+_web_dir = load_settings().web_dir
+if _web_dir.is_dir():
+    app.mount("/", StaticFiles(directory=str(_web_dir), html=True), name="web")
+else:  # pragma: no cover - 只有仓库被裁剪过才会走到
+    logging.getLogger(__name__).warning("web/ 不存在，前端不挂载：%s", _web_dir)

@@ -51,6 +51,15 @@ class Settings:
         return PROJECT_DIR / ".cache" / "index.json"
 
     @property
+    def web_dir(self) -> Path:
+        """前端三件套所在目录（零构建，纯静态）。
+
+        与 `index_path` 同一个基准（`PROJECT_DIR`，也就是 `starter/`），
+        所以仓库里**不出现任何本机绝对路径**（契约 §8）。
+        """
+        return PROJECT_DIR / "web"
+
+    @property
     def live(self) -> bool:
         """契约 §7.2：没有 Key 就进入 mock 降级模式，服务照常启动。"""
         return bool(self.llm_api_key and self.llm_base_url and self.llm_model)
