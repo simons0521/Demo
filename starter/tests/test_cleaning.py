@@ -44,10 +44,10 @@ def _make_source(path: Path, rows: list[tuple]) -> Path:
     return path
 
 
-#: 20 行合成明细，每一行都是为了压中某一条或某几条规则而造的。
+#: 21 行合成明细，每一行都是为了压中某一条或某几条规则而造的。
 #: 列：order_id, date, store_id, product_id, qty, amount, payment
 _ROWS = [
-    # --- 应当保留的 8 行 ---
+    # --- 应当保留的 9 行 ---
     ("ORD1", "2026-06-01", "S01", "P01", "1", "10.00", "微信"),
     # §2.1 编号大小写与首尾空白要规范化；§2.2 斜杠日期；§2.3 带 ¥ 的金额
     ("ORD2", "2026/6/2", "s02 ", " p02", "2", "¥20.00", "支付宝"),
@@ -91,7 +91,7 @@ _EXPECTED_REMOVED = {
     "5_product_not_in_products": 1,
     "6_duplicate_row": 1,
 }
-_EXPECTED_KEPT = 8
+_EXPECTED_KEPT = 9
 
 
 @pytest.fixture(scope="module")
@@ -201,7 +201,7 @@ def test_report_shape_covers_every_reason(cleaned):
     report, _ = cleaned
     assert set(report.removed) == set(REMOVAL_REASONS)
     assert report.kept_sales_rows + report.kept_refund_rows == report.kept_rows
-    assert report.kept_sales_rows == 6
+    assert report.kept_sales_rows == 7
     assert report.kept_refund_rows == 2
 
 
