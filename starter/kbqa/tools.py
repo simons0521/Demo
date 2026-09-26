@@ -50,7 +50,9 @@ class DataTools:
             self._local.conn = None
 
     def _where(self, start: str, end: str, store_id=None, product_id=None) -> tuple[str, list]:
-        clause = ["date >= ?", "date < ?"]
+        # 契约 §4：区间两端都含。写成 `date < end` 会整天丢掉区间最后一天，
+        # 而且丢得不显眼——只有正好查单日或查月末时才看得出来。
+        clause = ["date >= ?", "date <= ?"]
         params: list[Any] = [start, end]
         if store_id:
             clause.append("store_id = ?")
@@ -91,16 +93,25 @@ class DataTools:
     # -- 指标 -------------------------------------------------------------------
 
     def query_metrics(self, start: str, end: str, store_id=None, product_id=None) -> dict:
-        """营业额、退款、订单数、客单价、销量。客单价 = 营业额 ÷ 明细行数。"""
+        """营业额、退款、订单数、客单价、销量，全部按 KB-001 §4 的口径。
+
+        * 净营业额 = 销售行 + 退款行（退款行金额为负，直接加进去就是净额）
+        * 退款金额 = 退款行金额之和的绝对值
+        * 有效订单数 = 销售行的 `COUNT(DISTINCT order_id)`。同一单点了两个菜只算一单，
+          退款行不参与。
+        * 销量 = 销售行数量 − 退款行数量
+        * 客单价 = 净营业额 ÷ 有效订单数
+
+        一个查询取完四个基数，避免分两次查时区间跨了午夜对不上。
+        """
         where, params = self._where(start, end, store_id, product_id)
-        # 退款行不是营业，直接排掉，省得把营业额算少了。
         row = self.conn.execute(
             """
             SELECT COALESCE(SUM(amount_cents), 0),
-                   0,
-                   COUNT(*),
-                   COALESCE(SUM(qty), 0)
-            FROM sales_clean WHERE %s AND is_refund = 0
+                   COALESCE(-SUM(CASE WHEN is_refund = 1 THEN amount_cents END), 0),
+                   COUNT(DISTINCT CASE WHEN is_refund = 0 THEN order_id END),
+                   COALESCE(SUM(CASE WHEN is_refund = 0 THEN qty ELSE -qty END), 0)
+            FROM sales_clean WHERE %s
             """
             % where,
             params,
@@ -113,7 +124,8 @@ class DataTools:
             "store_id": store_id,
             "product_id": product_id,
             "net_revenue": yuan(net_cents),
-            "refund_amount": yuan(-refund_cents),
+            # 上面已经取过绝对值，这里不能再取负
+            "refund_amount": yuan(refund_cents),
             "orders": orders,
             "aov": aov,
             "qty": qty,

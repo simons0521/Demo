@@ -171,9 +171,9 @@ def test_store_and_product_filters(tools):
     assert tools.query_metrics(*_JUNE, store_id="S02")["net_revenue"] == 7.00
     assert tools.query_metrics(*_JUNE, store_id=" s02 ")["net_revenue"] == 7.00
     assert tools.query_metrics(*_JUNE, store_id="S01")["net_revenue"] == 57.00
-    # P02 在 6 月只有两行：卖出 10.00，退回 8.00
-    assert tools.query_metrics(*_JUNE, product_id="P02")["net_revenue"] == 2.00
-    assert tools.query_metrics(*_JUNE, store_id="S01", product_id="P02")["net_revenue"] == 2.00
+    # P02 在 6 月有三行：卖出 10.00 + 6.00，退回 8.00
+    assert tools.query_metrics(*_JUNE, product_id="P02")["net_revenue"] == 8.00
+    assert tools.query_metrics(*_JUNE, store_id="S01", product_id="P02")["net_revenue"] == 8.00
     # 拆开加起来要等于总数
     assert (
         tools.query_metrics(*_JUNE, store_id="S01")["net_revenue"]
