@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from .answerer import Answerer
 from .schemas import Answer
@@ -16,8 +16,18 @@ from .toolspec import TOOLS
 MAX_TOOL_ROUNDS = 4
 MAX_BAD_ARGS = 2
 _DOC_MARK = re.compile(r"[\[【]\s*(KB-\d+)\s*[\]】]")
-_NUMBER = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?")
+#: 连字符只有在**不是紧跟在数字或汉字后面**时才算负号。
+#: `-?\d+` 这种写法把范围写法也吃进去了：`8 月 10 日-31 日` 里的 `-31`
+#: 被读成一个负数，然后拿去找工具结果、找不到，C07 那句本来答得好好的
+#: 回答就被判成"编了数字"、换成模板兜底。日期里的 `2026-08` 同理。
+_NUMBER = re.compile(r"(?<![0-9一-鿿])-?\d+(?:,\d{3})*(?:\.\d+)?")
 _DATE_LIKE = re.compile(r"\d{4}-\d{2}-\d{2}")
+#: DeepSeek 用它自己的一套标记表达工具调用。正常情况它走结构化的
+#: `tool_calls` 字段；但**没有下发 `tools` 的那一轮**它会把标记当正文发出来：
+#: `finish_reason="stop"`、`tool_calls=[]`、正文是一段 XML。
+#: 引擎原来只看 `tool_calls` 空不空，于是这段标记成了最终答案——
+#: V01、H06 实测就是这么答出来的，用户收到的是一串 XML。
+_TOOL_MARKUP = re.compile(r"<[｜|]{2}\s*DSML")
 
 SYSTEM_PROMPT = """你是一家连锁餐饮公司的经营分析助手，服务对象是运营同事。
 今天固定是 {today}，所有“现在/最近/目前”都以这一天为准。
@@ -75,6 +85,16 @@ class LiveEngine:
                 on_call=trace.llm,
             )
             if not reply.tool_calls:
+                if _TOOL_MARKUP.search(reply.content):
+                    # 模型在要工具，只是没用结构化格式发出来。这**不是回答**：
+                    # 就当这一轮没拿到答案，按已有的工具结果渲染模板。
+                    # 不把标记原样给用户，也不假装它是"没收敛"而整题拒答——
+                    # 数据其实已经查到了，模板答案至少是有据可查的。
+                    return self._fallback(
+                        plan,
+                        trace,
+                        "模型把工具调用写成了正文里的标记，已改用按工具结果渲染的模板回答。",
+                    )
                 return self._finalise(plan, reply.content, evidence, retrieved, trace)
             # D8：assistant 消息整条追加，含 reasoning_content，否则下一轮 400。
             messages.append(reply.message)
@@ -148,16 +168,16 @@ class LiveEngine:
                 doc_ids.append(match.group(1))
         text = _DOC_MARK.sub("", content).strip()
         citations = self._citations(plan, doc_ids)
-        allowed = self._allowed_numbers(plan, evidence, citations)
+        allowed = self._allowed_numbers(plan, evidence, citations, retrieved)
         bad = [value for value in _numbers_in(text) if not _matches(value, allowed)]
         if bad:
             trace.step("number_check_failed", {"unmatched": bad[:5]})
-            fallback = self.answerer.answer(plan, trace)
-            fallback.notes.append(
+            return self._fallback(
+                plan,
+                trace,
                 "模型回答里的数字 %s 在工具结果里找不到，已改用按工具结果渲染的模板回答。"
-                % "、".join(str(value) for value in bad[:5])
+                % "、".join(str(value) for value in bad[:5]),
             )
-            return fallback
         if not text:
             raise LLMError("empty_content", "模型最终回答为空")
         if evidence and citations:
@@ -175,6 +195,17 @@ class LiveEngine:
             data_evidence=evidence,
         )
 
+    def _fallback(self, plan: Plan, trace, note: str) -> Answer:
+        """模型这条路走不通时，改用按工具结果渲染的模板回答。
+
+        这是引擎一贯的做法：数字和引用由代码渲染，模型只负责叙述。
+        两种情况会走到这里——回答里的数字对不上工具结果，或者模型压根
+        没给回答（把工具调用写成了正文标记）。
+        """
+        answer = self.answerer.answer(plan, trace)
+        answer.notes.append(note)
+        return answer
+
     def _citations(self, plan: Plan, doc_ids: list[str]) -> list[dict]:
         """引用由代码生成：从模型点名的文档里挑最相关的一句原文，保证逐字可核对。"""
         citations = []
@@ -189,10 +220,26 @@ class LiveEngine:
                 citations.append(citation)
         return citations
 
-    def _allowed_numbers(self, plan: Plan, evidence: list[dict], citations: list[dict]) -> list[float]:
+    def _allowed_numbers(
+        self,
+        plan: Plan,
+        evidence: list[dict],
+        citations: list[dict],
+        retrieved: Optional[dict] = None,
+    ) -> list[float]:
+        """回答里允许出现哪些数字：模型**确实看到过**的那些。
+
+        留这个白名单是为了拦住编造的、心算的数字，不是为了让文档题答不出来。
+        所以检索结果也算数——那是模型眼前的内容，它引用里面的一句话，
+        数字当然是对的。`retrieved` 一直都在收集，只是从来没人用它：
+        结果是模型引用了检索到的另一篇文档、或者上一轮答案里的数字，
+        就被判成"编造"，整段回答换成模板。
+        """
         allowed: list[float] = []
         for item in evidence:
             allowed.extend(_numbers_in(json.dumps(item, ensure_ascii=False)))
+        for hits in (retrieved or {}).values():
+            allowed.extend(_numbers_in(json.dumps(hits, ensure_ascii=False)))
         for citation in citations:
             allowed.extend(_numbers_in(self.answerer.retriever.index.texts.get(citation["doc_id"], "")))
         allowed.extend(_numbers_in(plan.question))

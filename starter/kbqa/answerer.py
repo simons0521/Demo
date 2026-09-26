@@ -24,8 +24,11 @@ VOCAB_SOFT_GATE = 0.45
 RETRIEVAL_SOFT_GATE = 12.0
 #: 问得太泛时的反问阈值：检索连一个像样的命中都没有。
 CLARIFY_SCORE = 8.0
-#: 拼给作答用的资料最长多少字，太长了没必要。
-MAX_CONTEXT_CHARS = 200
+#: 拼给作答用的资料最长多少字。
+#: 这是**答案本身**（模板作答与兜底作答都直接用它），不是喂给模型的上下文，
+#: 200 字连两条引用都放不下——第一条刚写完就被砍在半个句子上，
+#: 而整篇原文却另有一处原样拼上去（见 `_answer_doc`）。两头正好搞反了。
+MAX_CONTEXT_CHARS = 600
 
 
 class Answerer(HybridAnswers):
@@ -74,7 +77,13 @@ class Answerer(HybridAnswers):
         candidates = self._candidates(plan, result, require_value=True)
         if not candidates:
             candidates = self._candidates(plan, result, require_value=False)
-        candidates.sort(key=lambda item: (round(item["score"], 2), item["effective_from"]))
+        # `reverse=True` 是必需的：下一行就把 `candidates[0]` 当最高分用，
+        # 而 `sort()` 默认是升序——原来这里排完，拿到的永远是**最差**的那句。
+        # 排序键的第二个分量是生效日期，倒序正好让"分数接近时以更新的为准"
+        # 按注释说的生效（这是排序方向的顺带效果，不是巧合）。
+        candidates.sort(
+            key=lambda item: (round(item["score"], 2), item["effective_from"]), reverse=True
+        )
         lines: list[str] = []
         citations: list[dict] = []
         used_terms: set[str] = set()
@@ -310,14 +319,6 @@ class Answerer(HybridAnswers):
 
     # -- 纯文档 -----------------------------------------------------------------
 
-    def _context(self, result: SearchResult) -> str:
-        """把命中的那篇文档原样拼进来，答案就在里面，别漏了。"""
-        blocks: list[str] = []
-        for hit in result.hits[:1]:
-            for chunk in self.retriever.index.chunks_of(hit.doc_id):
-                blocks.append(chunk.text)
-        return ("\n".join(blocks) + "\n") if blocks else ""
-
     def _should_refuse(self, plan: Plan, confidence: float, top_score: float) -> Optional[str]:
         """三个信号一起判断“知识库里到底有没有这件事”。"""
         vocab = self.facts.vocab_coverage(plan.slots.get("clean_question") or plan.standalone)
@@ -351,4 +352,8 @@ class Answerer(HybridAnswers):
                 answer_type="clarify",
                 notes=["检索最高分 %.1f，且问题里没有指标、时间或门店" % top_score],
             )
-        return Answer(answer=self._context(result) + body, answer_type="doc", citations=citations)
+        # 这里原来返回的是 `self._context(result) + body`：把命中文档的**全部原文**
+        # 原样拼在答案前面，再跟上 200 字的正文。结果是答案 1496 字、1677 字地
+        # 把整篇文档倒给用户（C04、S01、V03 实测），而被真正挑出来、带引用
+        # 的那两句话反倒被砍掉。引用本身就是逐字原文，不需要再附一份全文。
+        return Answer(answer=body, answer_type="doc", citations=citations)
