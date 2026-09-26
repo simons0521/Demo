@@ -1,0 +1,6 @@
+# 评测脚本默认把报告写到当前目录（--out 默认 "."），不提交临时产物
+/report.json
+/report.md
+
+# 调试用的模型流量日志（eval/llm_gateway.py proxy --log）
+/llm_traffic.jsonl
