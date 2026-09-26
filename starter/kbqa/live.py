@@ -22,6 +22,10 @@ _DOC_MARK = re.compile(r"[\[【]\s*(KB-\d+)\s*[\]】]")
 #: 回答就被判成"编了数字"、换成模板兜底。日期里的 `2026-08` 同理。
 _NUMBER = re.compile(r"(?<![0-9一-鿿])-?\d+(?:,\d{3})*(?:\.\d+)?")
 _DATE_LIKE = re.compile(r"\d{4}-\d{2}-\d{2}")
+#: 三段以上用连字符串起来的数字串是电话、单号，不是数量：`021-5555-0104`。
+#: 要整串掐掉——`5555` 单独拎出来跟一个正常数量长得一模一样。
+#: 两段的（`2026-08`）不算，那是日期写法，`_DATE_LIKE` 处理三段标准日期之外的。
+_PHONE_LIKE = re.compile(r"\d{2,}(?:-\d{2,}){2,}")
 #: DeepSeek 用它自己的一套标记表达工具调用。正常情况它走结构化的
 #: `tool_calls` 字段；但**没有下发 `tools` 的那一轮**它会把标记当正文发出来：
 #: `finish_reason="stop"`、`tool_calls=[]`、正文是一段 XML。
@@ -241,14 +245,28 @@ class LiveEngine:
         数字当然是对的。`retrieved` 一直都在收集，只是从来没人用它：
         结果是模型引用了检索到的另一篇文档、或者上一轮答案里的数字，
         就被判成"编造"，整段回答换成模板。
+
+        **周报、纪要、复盘里的数字例外**（`Doc.estimates_only`，出处是
+        KB-001 §5.2：那些数字是人工估算，不能当答案）。这条规则代码里另外三处
+        ——`answerer`、`hybrid`、`retriever`——都执行了，只有这里漏了。
+        漏掉的后果实测过：模型答 H02 时顺手转述了店长周报里"大概 150 份"，
+        因为 KB-050 在检索结果里就成了"合法数字"，而那道题恰恰要求答案里
+        不能出现 150。模型**自己点名的引用**同样按这条挡住——只堵检索结果
+        这一头的话，它写在答案里的 `[KB-050]` 会把整篇文档的数字原样放回来。
         """
         allowed: list[float] = []
         for item in evidence:
             allowed.extend(_numbers_in(json.dumps(item, ensure_ascii=False)))
         for hits in (retrieved or {}).values():
-            allowed.extend(_numbers_in(json.dumps(hits, ensure_ascii=False)))
+            for hit in hits if isinstance(hits, list) else []:
+                if self._estimates_only(hit.get("doc_id")):
+                    continue
+                allowed.extend(_numbers_in(json.dumps(hit, ensure_ascii=False)))
         for citation in citations:
-            allowed.extend(_numbers_in(self.answerer.retriever.index.texts.get(citation["doc_id"], "")))
+            doc_id = citation["doc_id"]
+            if self._estimates_only(doc_id):
+                continue
+            allowed.extend(_numbers_in(self.answerer.retriever.index.texts.get(doc_id, "")))
         allowed.extend(_numbers_in(plan.question))
         allowed.extend(_numbers_in(plan.standalone))
         if plan.window:
@@ -258,12 +276,46 @@ class LiveEngine:
             derived.extend([round(value, 2), round(value)])
         return sorted(set(allowed + derived))
 
+    def _estimates_only(self, doc_id: Optional[str]) -> bool:
+        """这篇文档的数字是不是"人工估算、不能当答案"（KB-001 §5.2）。
+
+        判定来自加载器写在 `docs_meta` 里的 `estimates_only`，也就是门禁里
+        `type: 周报 / 会议纪要 / 复盘` 的那几篇——`hybrid.py` 和 `answerer.py`
+        用的是同一个标记，不另立一套判据。
+        """
+        meta = self.answerer.retriever.index.docs_meta.get(doc_id or "") or {}
+        return bool(meta.get("estimates_only"))
+
+
+def _is_identifier(raw: str) -> bool:
+    """这一串是**编号**，不是数量。
+
+    两种写法都算编号：前导零的长串（`0104`——数量不会这么写，编号才会），
+    以及夹在连字符串里的。后者在 `_numbers_in` 里由 `_PHONE_LIKE` 整串掐掉，
+    这里只管前者。
+
+    **卡在 3 位以上**：`08`、`09` 这种两位的零填充是月份和日期，是数量。
+    """
+    digits = raw.lstrip("-").replace(",", "")
+    return len(digits) > 2 and digits.startswith("0") and "." not in digits
+
 
 def _numbers_in(text: str) -> list[float]:
+    # 顺序要紧，三步都不能换：
+    # 1. `2026-06-18` 这种日期先拆成空格分隔的——年月日各自是数量，该算数；
+    # 2. 再整串掐掉电话、单号（`021-5555-0104`，KB-033 里门店的联系电话）。
+    #    必须整串掐：`5555` 单独拎出来跟一个正常数量长得一模一样，
+    #    门店档案里那串号码就是这么把 `104` 送进白名单的——模型心算的
+    #    `104%` 因此被放行，守卫不开火，H02 实测漏掉的就是这一条；
+    # 3. 最后才逐个取数，并对单串做编号判断（`0104` 这种没有连字符的）。
+    scrubbed = _DATE_LIKE.sub(lambda m: m.group(0).replace("-", " "), text or "")
     values = []
-    for match in _NUMBER.finditer(_DATE_LIKE.sub(lambda m: m.group(0).replace("-", " "), text or "")):
+    for match in _NUMBER.finditer(_PHONE_LIKE.sub(" ", scrubbed)):
+        raw = match.group(0)
+        if _is_identifier(raw):
+            continue
         try:
-            values.append(float(match.group(0).replace(",", "")))
+            values.append(float(raw.replace(",", "")))
         except ValueError:
             continue
     return values

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 
 import pytest
 
@@ -83,12 +84,18 @@ class _ScriptedClient:
 
 
 class _RecordingAnswerer:
-    """模板兜底：记下来自己有没有被叫到，再给一个明显好认的答案。"""
+    """模板兜底：记下来自己有没有被叫到，再给一个明显好认的答案。
+
+    `index` 只是给 `LiveEngine._estimates_only()` 用的——每收一条检索结果
+    它都要问一句"这篇是不是周报、纪要那类估算文档"。真实索引里 `docs_meta`
+    一直都在，这里给个空的就够（这组测试的检索结果都不是估算文档）。
+    """
 
     TEMPLATE = "（模板兜底答案）"
 
     def __init__(self) -> None:
         self.calls = 0
+        self.retriever = SimpleNamespace(index=SimpleNamespace(docs_meta={}))
 
     def answer(self, plan, trace=None) -> Answer:
         self.calls += 1
