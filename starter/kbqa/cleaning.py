@@ -102,8 +102,20 @@ class CleaningReport:
 
 
 def open_readonly(path: Path) -> sqlite3.Connection:
-    """打开数据库。"""
-    conn = sqlite3.connect(path.as_posix(), check_same_thread=False)
+    """以**只读**方式打开数据库。
+
+    契约 §5 要求"数据库不能有任何改动"。原来的实现叫 `open_readonly`，
+    做的却是普通的 `sqlite3.connect`——名字只表达了意图，没有任何东西
+    拦着写：`run_sql` 是模型可以直接调的工具，它只要发出一条
+    `DELETE` / `DROP`，清洗表就没了，而且后面每个指标都会跟着错。
+    用 URI 的 `mode=ro`，写操作由 SQLite 自己拒绝，不靠调用方自觉。
+
+    路径先 `resolve()` 再 `as_uri()`：URI 里带空格、`?`、`#` 的路径
+    （macOS 上很常见）必须转义，手拼 `file:` 前缀会连库都打不开。
+    """
+    conn = sqlite3.connect(
+        path.resolve().as_uri() + "?mode=ro", uri=True, check_same_thread=False
+    )
     conn.row_factory = sqlite3.Row
     return conn
 

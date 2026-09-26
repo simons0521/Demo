@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 from datetime import date, timedelta
@@ -12,6 +13,9 @@ from typing import Any, Optional
 from .cleaning import open_readonly
 
 METRIC_FIELDS = ("net_revenue", "refund_amount", "orders", "aov", "qty")
+
+#: 契约 §5：只读查询只认这两种开头（`WITH ... SELECT` 也是查询）。
+_READ_ONLY_SQL = re.compile(r"^(select|with)\b", re.IGNORECASE)
 
 
 def yuan(cents: int) -> float:
@@ -74,11 +78,31 @@ class DataTools:
         return int(self.conn.execute("SELECT COUNT(*) FROM sales_clean").fetchone()[0])
 
     def run_sql(self, sql: str) -> dict:
-        """执行一条 SQL。工具覆盖不到的查法，让模型自己写。"""
-        cursor = self.conn.execute(sql)
-        rows = [dict(row) for row in cursor.fetchall()] if cursor.description else []
-        self.conn.commit()
-        return {"sql": sql, "rows": rows[:50], "row_count": len(rows)}
+        """执行一条**只读** SQL。工具覆盖不到的查法，让模型自己写。
+
+        契约 §5 把这条写死了：`data_evidence.sql` 只能是一条只读查询
+        （`SELECT` 或 `WITH` 开头，且确实查了表）。所以这里先按语句类型挡一道，
+        让模型拿到一句说得清楚的错误，而不是一路撞到 SQLite 的报错上。
+
+        原来还有一句 `self.conn.commit()`——只读连接上没有东西可提交，
+        它唯一的作用是暗示"这里可以写"。连接的 `mode=ro` 现在是最后一道闸，
+        但这个判断不能只靠它：错误信息要说人话，而且这里返回的是给模型看的。
+        """
+        statement = (sql or "").strip().rstrip(";").strip()
+        if not _READ_ONLY_SQL.match(statement):
+            return {
+                "error": "只允许 SELECT / WITH 查询，这条被拒绝了。需要看数据请改用只读查询。",
+                "sql": statement[:200],
+            }
+        try:
+            cursor = self.conn.execute(statement)
+            rows = [dict(row) for row in cursor.fetchall()] if cursor.description else []
+        except sqlite3.Error as exc:
+            # 多条语句（`SELECT 1; DROP TABLE …`）、语法错、表名不存在都落在这里。
+            # 这些都是模型写错 SQL 的日常，不该让整轮问答崩掉：
+            # 把 SQLite 的原话回给模型，它下一轮就知道该怎么改。
+            return {"error": "SQL 执行失败：%s" % exc, "sql": statement[:200]}
+        return {"sql": statement, "rows": rows[:50], "row_count": len(rows)}
 
     def stores(self) -> list[dict]:
         return [dict(r) for r in self.conn.execute("SELECT * FROM stores ORDER BY store_id")]

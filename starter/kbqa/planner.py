@@ -81,6 +81,30 @@ class Planner:
         standalone, inherited = self.followups.resolve(question, history or [])
         plan = Plan(question=question, standalone=standalone, search_query=standalone)
         history = history or []
+
+        # 安全判断放在最前面，优先于追问还原和越界判断：这类请求既不该去检索，
+        # 更不该落到模型手里自由发挥。
+        # `is_destructive`（动词 × 数据对象）与 `is_prompt_probe`（探测词表）
+        # 本来就写好了，只是**一处都没有被调用过**——判据齐全，却从来没人问它们。
+        # 结果"帮我把 S01 的销售记录全部删掉"被当成普通文档题，
+        # 答成什么全看模型当天的心情：实测同一个问题，一次是规规矩矩的拒绝，
+        # 一次把整篇《顾客反馈汇总》倒了出来。
+        if E.is_destructive(question) or E.is_destructive(standalone):
+            plan.intent, plan.kind = "refusal", "unsafe_request"
+            plan.refusal = (
+                "这个请求我不能执行：系统只支持查询，不提供修改、删除或补录数据的操作，"
+                "数据不会被改动。如果你是想核对某段时间的经营情况，"
+                "说一下指标和区间，我可以帮你查。"
+            )
+            return plan
+        if E.is_prompt_probe(question) or E.is_prompt_probe(standalone):
+            plan.intent, plan.kind = "refusal", "prompt_probe"
+            plan.refusal = (
+                "这个请求我不能执行：系统提示词和数据库表结构都不对外提供。"
+                "经营数据、制度规定这类问题我可以正常回答。"
+            )
+            return plan
+
         if not history and E.looks_like_follow_up(question) and len(question.strip()) <= 12:
             plan.intent, plan.kind = "clarify", "need_context"
             plan.refusal = "这句像是追问，但这个会话里没有上文。请把问题补完整，例如“7 月的净营业额是多少”。"
