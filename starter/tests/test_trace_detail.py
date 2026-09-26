@@ -27,7 +27,7 @@ from kbqa.aliases import AliasTable
 from kbqa.chunker import Chunk
 from kbqa.index import BM25Index
 from kbqa.llm import LLMReply
-from kbqa.retriever import Retriever
+from kbqa.retriever import MAX_TRACE_DROPPED, MAX_TRACE_HITS, Retriever
 from kbqa.trace import Trace
 
 #: 废止版：本来分最高，但自 2026-07-01 起被 KB-NEW 取代。
@@ -35,8 +35,12 @@ _OLD_META = {"status": "已废止", "superseded_by": "KB-NEW", "effective_from":
 _NEW_META = {"status": "现行", "effective_from": "2026-07-01"}
 _META = {"KB-OLD": _OLD_META, "KB-NEW": _NEW_META}
 
+#: 废止版的正文**必须比现行版更贴题**，这套夹具才成立：反事实要演示的正是
+#: "本来该它第一，只是被版本规则挡掉了"。改这几行字之前先跑
+#: `test_counterfactual_rank_...`——`的` 一多（"苹果**的**退款"）bigram 就从
+#: `果退` 变成 `果的`/`的退`，废止版反而拼不过现行版，名次掉到 2。
 _PAIRS = [
-    ("KB-OLD", 1, "苹果苹果苹果的退款时限是 7 天，苹果退款规则见附件。"),
+    ("KB-OLD", 1, "苹果退款时限 7 天，苹果退款规则见附件。"),
     ("KB-NEW", 1, "苹果的退款时限说明，苹果退款规则补充条款。"),
     ("KB-C", 1, "苹果的陈列要求，苹果摆放位置在货架第二层。"),
 ]
@@ -50,7 +54,10 @@ def _index(pairs, meta=None) -> BM25Index:
     return BM25Index(chunks, meta or {}, AliasTable.from_json({}), "test-key")
 
 
-def _retriever(pairs=_PAIRS, meta=None) -> Retriever:
+def _retriever(pairs=_PAIRS, meta=_META) -> Retriever:
+    # `meta` 默认必须是 `_META`：整个文件考的就是"废止版被过滤之后，
+    # 本来会得多少分"。默认成空元数据的话，KB-OLD 根本不会被过滤，
+    # 断言只会以外面的"前提不成立"红掉——看着像没实现，其实是夹具写漏了。
     return Retriever(_index(pairs, meta), date(2026, 9, 1))
 
 
@@ -89,10 +96,25 @@ def test_counterfactual_equals_the_score_the_doc_would_have_got():
 
 
 def test_counterfactual_rank_says_how_high_the_filtered_doc_would_have_ranked():
-    """废止版本来会排第 1——这正是这个仓库里最要命的那类 bug 的样子。"""
+    """废止版本来会排第 1——这正是这个仓库里最要命的那类 bug 的样子。
+
+    名次拿"关掉过滤重跑"的**真实顺序**去核，不写死一个数字：写死的话，
+    名次算成"片段名次"（同一篇文档的第二个高分片段也算在它前面）也照样能凑出
+    同一个数，看不出来。这段代码里"文档名次"和"片段名次"差在哪，
+    只有多块的文档才分得出来——所以核对的基准必须是真实结果里的顺序。
+    """
     result = _retriever().search("苹果退款", top_k=5, explain=True)
     filtered = {item["doc_id"]: item for item in result.filtered}
-    assert filtered["KB-OLD"]["would_be_rank"] == 1
+    assert "KB-OLD" in filtered, "废止版没被过滤，这条测试的前提不成立"
+
+    actual = _AllowEverything(_index(_PAIRS, _META), date(2026, 9, 1)).search(
+        "苹果退款", top_k=5
+    )
+    order = [hit.doc_id for hit in actual.hits if not hit.padded]
+    assert "KB-OLD" in order, "关掉过滤之后 KB-OLD 也没进结果，这条测试的前提不成立"
+
+    assert filtered["KB-OLD"]["would_be_rank"] == order.index("KB-OLD") + 1
+    assert filtered["KB-OLD"]["would_be_rank"] == 1, "废止版本来会排第一，这正是原来那道缺陷的样子"
 
 
 # -- explain 必须是只读的 ---------------------------------------------------------
@@ -163,11 +185,26 @@ def test_as_trace_payload_stays_small():
     """面板要能加载得动：明细再多也不能把 trace 撑成几兆。
 
     评测脚本对响应有 2 MB 上限（`eval/README.md`），这里按更严的 64 KB 卡。
+
+    语料**故意造得比真实知识库大**（真实是 35 篇 / 204 块，这里是 40 篇 / 320 块），
+    而且要一次取满：三个截断上限（片段 20 条、丢弃 30 条、正文 240 字）一个都
+    没踩到的话，这条测试就等于没测——真实语料上一跑就是几兆。
     """
-    retriever = _retriever()
-    payload = retriever.search("苹果退款", top_k=5, explain=True).as_trace()
-    assert len(json.dumps(payload, ensure_ascii=False)) < 64 * 1024
+    pairs = [
+        ("KB-%03d" % doc, number, "苹果退款规则第 %d 条，苹果时限说明。" % number)
+        for doc in range(40)
+        for number in range(1, 9)
+    ]
+    retriever = _retriever(pairs, {})
+    payload = retriever.search("苹果退款", top_k=len(pairs), explain=True).as_trace()
+
+    size = len(json.dumps(payload, ensure_ascii=False))
+    assert size < 64 * 1024, "trace 明细 %d 字节，面板加载不动" % size
     assert payload["hits"][0]["text"], "面板要显示片段正文，hits 里得带上它"
+    assert payload["hits_total"] == 40, "每篇一格，40 篇应该正好 40 条命中"
+    assert len(payload["hits"]) <= MAX_TRACE_HITS, "命中片段没有按上限截断"
+    assert len(payload["dropped"]) <= MAX_TRACE_DROPPED, "被丢弃的片段没有按上限截断"
+    assert payload["dropped_total"] == 40 * 7, "总数要报全量，不能只报截断后的条数"
 
 
 # -- live 路径真的把明细写进 trace 了 ----------------------------------------------
