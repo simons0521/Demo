@@ -82,3 +82,31 @@ class TraceStore:
     def get(self, trace_id: str) -> Optional[dict]:
         with self._lock:
             return self._data.get(trace_id)
+
+    def recent(self, limit: int = 20) -> list[dict]:
+        """最近几次问答的**摘要**，调试面板用来挑一条进去看。
+
+        只给摘要，**绝不返回完整 `steps`**：一次问答的 trace 有大几十 KB
+        （检索明细是大头），20 份叠起来这个响应就没法用了；面板在这儿要的
+        本来也只是"有哪些次问答"。要看细节走 `/api/trace/{trace_id}`。
+
+        最新的排最前面：列表是给人从上往下看的。
+        """
+        with self._lock:
+            items = list(self._data.values())[-max(1, limit) :]
+        return [self._summary(payload) for payload in reversed(items)]
+
+    @staticmethod
+    def _summary(payload: dict) -> dict:
+        return {
+            "trace_id": payload.get("trace_id"),
+            "session_id": payload.get("session_id"),
+            "question": payload.get("question"),
+            "started_at": payload.get("started_at"),
+            "total_ms": payload.get("total_ms"),
+            # 三个都是**计数**，不是内容。名字里带 `count` 是故意的：完整 trace 里
+            # `llm_calls` 是个列表，摘要里同名字段放个整数，读的人迟早会当成列表用。
+            "step_count": len(payload.get("steps") or []),
+            "llm_call_count": len(payload.get("llm_calls") or []),
+            "error_count": len(payload.get("errors") or []),
+        }

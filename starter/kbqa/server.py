@@ -47,6 +47,47 @@ class RetrieveRequest(BaseModel):
     top_k: int = Field(default=5, ge=1)
 
 
+#: 清洗剔除原因的中文标签，第一关的“数据质量”面板要显示人话。
+#: 键名来自 `cleaning.REMOVAL_REASONS` 与 `CleaningReport.as_dict()`。
+#: 一律 `.get(key, key)` 兜底：评审换 `data/` 之后键名若变，面板上显示英文键名，
+#: 而不是整条接口 500。
+REMOVAL_LABELS = {
+    "1_unparseable_date": "日期三种格式都解析不了（KB-001 §3.1）",
+    "2_empty_amount": "金额为空或解析不了（剔除，不回填）",
+    "3_qty_le_zero": "数量 ≤ 0，或压根不是整数",
+    "4_store_not_in_stores": "门店编号不在维表里",
+    "5_product_not_in_products": "商品编号不在维表里",
+    "6_duplicate_row": "七个字段规范化后完全一致的重复行",
+}
+
+#: `removed` 里还嵌着一个**不参与剔除**的注解：`note_unparseable_amount` 是
+#: `2_empty_amount` 里"金额是垃圾值、不是空值"的那部分，**已经计在上面那一格**。
+#: 面板要是把它当成第七条剔除原因加起来，总数就和 `raw_rows - kept_rows` 对不上了，
+#: 所以标成 `kind: "note"` 让面板分开渲染。
+NOTE_LABELS = {
+    "note_unparseable_amount": "其中金额是垃圾值而非空值（已含在上一行，不重复剔除）",
+}
+
+
+def removal_reasons(report: dict) -> list[dict]:
+    """把 `cleaning_report["removed"]` 变成带中文标签的列表，顺序照原样。
+
+    按报告里**实际有的键**遍历，不按标签表遍历：将来多一个剔除原因，
+    面板上会出现英文键名——看得见，比悄悄少一项强。
+    """
+    labels = dict(NOTE_LABELS)
+    labels.update(REMOVAL_LABELS)
+    return [
+        {
+            "key": key,
+            "label_cn": labels.get(key, key),
+            "removed": int(value or 0),
+            "kind": "note" if key in NOTE_LABELS else "reason",
+        }
+        for key, value in (report.get("removed") or {}).items()
+    ]
+
+
 def _bad_date(*values: str) -> Optional[JSONResponse]:
     for value in values:
         try:
@@ -107,10 +148,43 @@ def trace(trace_id: str):
 
 @app.get("/api/data_quality")
 def data_quality() -> dict:
-    """第一关的“数据质量”面板：清洗掉了多少行、各因为什么。"""
+    """第一关的“数据质量”面板：清洗掉了多少行、各因为什么。
+
+    `cleaning_report` 的形状**冻结不动**（它流进 `/api/health`，单测与评测都盯着
+    那几个键），中文标签另起一个 `removal_reasons` 字段。
+    """
     current = service()
+    report = current.tools.cleaning_report()
     return {
-        "cleaning_report": current.tools.cleaning_report(),
+        "cleaning_report": report,
         "data_period": current.data_period,
         "kb_warnings": current.index.warnings,
+        "removal_reasons": removal_reasons(report),
     }
+
+
+@app.get("/api/stores")
+def stores() -> dict:
+    """看板的门店下拉。
+
+    **门店不能由前端写死**：评审换掉 `data/` 之后门店就变了，写死的话面板
+    会开始撒没有依据的谎。包一层对象与其余接口保持一致。
+    """
+    return {"stores": service().tools.stores()}
+
+
+@app.get("/api/metrics/top_products")
+def metrics_top_products(
+    start: str = Query(...),
+    end: str = Query(...),
+    store_id: Optional[str] = None,
+    limit: int = Query(10, ge=1, le=100),
+):
+    bad = _bad_date(start, end)
+    return bad or service().tools.top_products(start, end, store_id, limit)
+
+
+@app.get("/api/traces")
+def traces(limit: int = Query(20, ge=1, le=100)) -> dict:
+    """最近几次问答的摘要，调试面板用来挑一条进去看。要看细节走 `/api/trace/{id}`。"""
+    return {"traces": service().traces.recent(limit)}
