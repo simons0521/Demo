@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 840" width="1200" height="840"
+     font-family="system-ui, -apple-system, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="840" fill="#ffffff"/>
+
+  <!-- ======================= 客户端 ======================= -->
+  <rect x="56" y="56" width="700" height="92" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="76" y="84" font-size="15" font-weight="600" fill="#0f172a">浏览器 · 零构建前端（web/，无 CDN、无构建步骤）</text>
+  <rect x="76" y="100" width="196" height="34" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="174" y="122" font-size="12.5" fill="#334155" text-anchor="middle">看板 #/dashboard</text>
+  <rect x="284" y="100" width="196" height="34" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="382" y="122" font-size="12.5" fill="#334155" text-anchor="middle">对话 #/chat</text>
+  <rect x="492" y="100" width="248" height="34" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="616" y="122" font-size="12.5" fill="#334155" text-anchor="middle">调试面板 #/debug/&lt;trace_id&gt;</text>
+
+  <rect x="776" y="56" width="368" height="92" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="796" y="84" font-size="15" font-weight="600" fill="#0f172a">评测与预检脚本（纯标准库）</text>
+  <text x="796" y="112" font-size="12.5" fill="#475569">eval/run_eval.py · 公开题库 55 题</text>
+  <text x="796" y="136" font-size="12.5" fill="#475569">eval/llm_gateway.py · 接入预检 / 代理</text>
+
+  <line x1="406" y1="148" x2="406" y2="192" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="960" y1="148" x2="960" y2="192" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="420" y="176" font-size="12" fill="#64748b">HTTP + JSON</text>
+
+  <!-- ======================= HTTP 层 ======================= -->
+  <rect x="56" y="196" width="1088" height="76" rx="12" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <text x="76" y="226" font-size="15" font-weight="600" fill="#0f172a">server.py · FastAPI HTTP 层</text>
+  <text x="76" y="252" font-size="12.5" fill="#475569">参数校验 · JSON 序列化 · StaticFiles 托管前端 · 内部无论出什么错都返回 HTTP 200 + 合法 JSON（错误体现在 refusal 与 trace 里）</text>
+
+  <line x1="600" y1="272" x2="600" y2="306" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ======================= 编排 ======================= -->
+  <rect x="56" y="310" width="1088" height="92" rx="12" fill="#eef2ff" stroke="#c7d2fe" stroke-width="1.5"/>
+  <text x="76" y="338" font-size="15" font-weight="600" fill="#0f172a">service.py · 编排：会话 → 规划 → 作答 → 留痕</text>
+  <rect x="76" y="354" width="250" height="34" rx="8" fill="#ffffff" stroke="#c7d2fe"/>
+  <text x="201" y="376" font-size="12.5" fill="#334155" text-anchor="middle">sessions.py 会话历史</text>
+  <rect x="338" y="354" width="430" height="34" rx="8" fill="#ffffff" stroke="#c7d2fe"/>
+  <text x="553" y="376" font-size="12.5" fill="#334155" text-anchor="middle">planner.py 意图 / 时间窗 / 门店商品槽位</text>
+  <rect x="780" y="354" width="344" height="34" rx="8" fill="#ffffff" stroke="#c7d2fe"/>
+  <text x="952" y="376" font-size="12.5" fill="#334155" text-anchor="middle">followup.py 追问还原（“那 7 月呢”）</text>
+
+  <!-- 编排 → 三条支线 -->
+  <line x1="600" y1="402" x2="600" y2="424" stroke="#64748b" stroke-width="1.5"/>
+  <line x1="226" y1="424" x2="974" y2="424" stroke="#64748b" stroke-width="1.5"/>
+  <line x1="226" y1="424" x2="226" y2="440" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="600" y1="424" x2="600" y2="440" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="974" y1="424" x2="974" y2="440" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ======================= 检索 ======================= -->
+  <rect x="56" y="444" width="340" height="220" rx="12" fill="#ecfdf5" stroke="#a7f3d0" stroke-width="1.5"/>
+  <text x="76" y="474" font-size="15" font-weight="600" fill="#0f172a">检索 · 知识库（BM25）</text>
+  <text x="76" y="502" font-size="12" fill="#475569">loader.py  认 doc_id、标题、生效日期</text>
+  <text x="76" y="528" font-size="12" fill="#475569">chunker.py + tokenizer.py  切块、二元分词</text>
+  <text x="76" y="554" font-size="12" fill="#475569">index.py  BM25 + 磁盘缓存（35 篇 / 204 片段）</text>
+  <text x="76" y="580" font-size="12" fill="#475569">retriever.py  打分、废止版失效过滤</text>
+  <text x="76" y="606" font-size="12" fill="#475569">docfacts.py / units.py  出逐字可核对的引用</text>
+  <text x="76" y="632" font-size="12" fill="#475569">同一套实现被 /api/retrieve 与问答共用</text>
+
+  <!-- ======================= 数据 ======================= -->
+  <rect x="430" y="444" width="340" height="220" rx="12" fill="#fff7ed" stroke="#fdba74" stroke-width="1.5"/>
+  <text x="450" y="474" font-size="15" font-weight="600" fill="#0f172a">数据 · POS（只读）</text>
+  <text x="450" y="502" font-size="12" fill="#475569">cleaning.py  六条剔除规则 → var/clean.db</text>
+  <text x="450" y="528" font-size="12" fill="#475569">18,628 行 → 剔除 338 → 保留 18,290 行</text>
+  <text x="450" y="554" font-size="12" fill="#475569">tools.py  汇总 / 按天 / 排行 / 对比 / 支付方式</text>
+  <text x="450" y="580" font-size="12" fill="#475569">run_sql  只读连接 + 只读 SQL（SELECT|WITH 且带 FROM）</text>
+  <text x="450" y="606" font-size="12" fill="#475569">回答里的经营数字只能从这里出，模型不参与算数</text>
+
+  <!-- ======================= 作答 ======================= -->
+  <rect x="804" y="444" width="340" height="220" rx="12" fill="#fdf2f8" stroke="#f9a8d4" stroke-width="1.5"/>
+  <text x="824" y="474" font-size="15" font-weight="600" fill="#0f172a">作答</text>
+  <text x="824" y="502" font-size="12" fill="#475569">live.py  有 Key：多轮工具调用（≤4 轮）</text>
+  <text x="824" y="528" font-size="12" fill="#475569">两道闸：数字白名单 + 引用逐字核对</text>
+  <text x="824" y="554" font-size="12" fill="#475569">任一不过 → 整段退回模板答案</text>
+  <text x="824" y="580" font-size="12" fill="#475569">answerer.py / hybrid.py  无 Key 或闸不过：模板作答</text>
+  <text x="824" y="606" font-size="12" fill="#475569">render.py  回答里的数字由代码渲染</text>
+
+  <!-- ======================= 留痕 / 外部模型 ======================= -->
+  <line x1="226" y1="664" x2="226" y2="686" stroke="#64748b" stroke-width="1.5"/>
+  <line x1="600" y1="664" x2="600" y2="686" stroke="#64748b" stroke-width="1.5"/>
+  <line x1="974" y1="664" x2="974" y2="686" stroke="#64748b" stroke-width="1.5"/>
+  <line x1="226" y1="686" x2="974" y2="686" stroke="#64748b" stroke-width="1.5"/>
+  <line x1="226" y1="686" x2="226" y2="700" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="600" y1="686" x2="600" y2="700" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="612" y="682" font-size="11.5" fill="#64748b">每步都写进 trace</text>
+
+  <rect x="56" y="704" width="700" height="100" rx="12" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="76" y="734" font-size="15" font-weight="600" fill="#0f172a">trace.py · 全过程留痕（内存，200 条）</text>
+  <text x="76" y="760" font-size="12" fill="#475569">改写后的查询 · 每个片段的分数与被过滤原因 · 工具调用与结果</text>
+  <text x="76" y="784" font-size="12" fill="#475569">发给模型的最终提示词与原始输出 · 每步耗时与错误</text>
+  <text x="736" y="784" font-size="12" fill="#334155" text-anchor="end">→ GET /api/trace/{trace_id}</text>
+
+  <line x1="1090" y1="664" x2="1090" y2="700" stroke="#64748b" stroke-width="1.5"
+        marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+  <text x="1078" y="688" font-size="11.5" fill="#64748b" text-anchor="end">工具调用 ↔ 结果</text>
+
+  <rect x="804" y="704" width="340" height="100" rx="12" fill="#fefce8" stroke="#fde047" stroke-width="1.5"/>
+  <text x="824" y="734" font-size="15" font-weight="600" fill="#0f172a">DeepSeek · deepseek-flash</text>
+  <text x="824" y="760" font-size="12" fill="#475569">OpenAI 兼容 POST {LLM_BASE_URL}/chat/completions</text>
+  <text x="824" y="784" font-size="12" fill="#475569">llm.py · httpx 手写客户端（不补 /v1）</text>
+</svg>
